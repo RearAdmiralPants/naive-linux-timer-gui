@@ -26,34 +26,56 @@ Both tabs share a naive animated pseudo-3D spinner (rotating gradient ring with
 orbiting dots) that reacts to running/alarm state — a starting point for
 fancier effects.
 
-## Run it
+## Prerequisites
 
-On your Linux workstation:
+Qt 6.5+ needs a system library that the PySide6 wheels do **not** bundle.
+Without it the app aborts at startup with `Could not load the Qt platform
+plugin "xcb"`. On Debian / Ubuntu / Mint:
 
 ```bash
-# from a virtualenv or your user environment
-pip install PySide6
-python -m naive_timer
+sudo apt install libxcb-cursor0
 ```
 
-Or install the package (adds a `naive-timer` command):
+This is the only thing that belongs to `sudo`. Everything Python-side goes in a
+virtualenv (below) — on Mint and other distros with an *externally managed*
+system Python, `sudo pip install` is both blocked and a good way to break
+`apt`-managed tooling.
+
+## Run it
 
 ```bash
-pip install -e .
+python3 -m venv .venv
+.venv/bin/python -m pip install -e .
+.venv/bin/python -m naive_timer
+```
+
+To install it as a real command (`naive-timer`) without touching the system
+Python, use [pipx](https://pipx.pypa.io/) — it builds a private virtualenv per
+application and puts the entry point on your `PATH`:
+
+```bash
+pipx install .
 naive-timer
 ```
 
 ## Develop / test
 
-The stopwatch model has no GUI dependency and can be tested anywhere:
+The stopwatch, countdown, and sound models have no GUI dependency and can be
+tested anywhere, with no third-party packages:
 
 ```bash
-# stdlib only, no extra deps needed
 python -m unittest discover -s tests -v
+```
 
-# or, if you have pytest
-pip install -e '.[dev]'
-pytest
+`tests/test_gui_smoke.py` additionally constructs the Qt widgets under
+`QT_QPA_PLATFORM=offscreen`. It needs PySide6 installed but **no display**, so
+it runs in CI and cloud containers; it skips itself if PySide6 is absent. It
+exists because the model tests can be entirely green while the app crashes on
+startup — which is exactly what happened once.
+
+```bash
+.venv/bin/python -m unittest discover -s tests -v   # includes the GUI smoke test
+.venv/bin/python -m pytest                          # same, via pytest
 ```
 
 ## Layout
@@ -69,6 +91,7 @@ tests/
   test_stopwatch.py
   test_countdown.py
   test_sound.py
+  test_gui_smoke.py  # constructs the Qt widgets offscreen (needs PySide6)
 ```
 
 The separation is deliberate: logic changes can be verified headlessly (e.g. in

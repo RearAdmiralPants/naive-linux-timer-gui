@@ -6,7 +6,24 @@ not transfer between the web/mobile app and a local terminal session. The code
 travels via git; this document travels the *reasoning* that isn't obvious from
 the diff.
 
-_Last updated: 2026-07-09, after adding the countdown/alarm Timer mode._
+_Last updated: 2026-07-09, after the first run on real hardware._
+
+## Lesson from the first local run
+
+The cloud session shipped 38 green tests and an app that **aborted before
+drawing a pixel**: `_AlertPlayer` passed `QSoundEffect.Infinite` (an enum) to
+`setLoopCount`, which under PySide6 6.11 wants an `int`. Compile-checking
+`app.py` could never have caught it, and no model test touches Qt.
+
+The fix is one line. The lesson is the important part: **"the logic is
+headlessly testable" is not the same as "the app starts."** `tests/
+test_gui_smoke.py` now constructs `MainWindow` and `_AlertPlayer` under
+`QT_QPA_PLATFORM=offscreen` — no display needed, so it runs in the same cloud
+container that missed the bug. It fails on the pre-fix code; that was verified,
+not assumed.
+
+Separately, PySide6 wheels don't bundle `libxcb-cursor0`, which Qt 6.5+ needs
+for the `xcb` platform plugin. It's a `sudo apt install`, now in the README.
 
 ## Where things stand
 
@@ -37,7 +54,7 @@ presses, nothing more.
 | `src/naive_timer/stopwatch.py` | Stopwatch model + `format_elapsed` | ✅ |
 | `src/naive_timer/countdown.py` | Countdown model + `parse_duration`/`parse_alarm` | ✅ |
 | `src/naive_timer/sound.py` | Runtime chime WAV synthesis (stdlib `wave`) | ✅ |
-| `src/naive_timer/app.py` | PySide6 tabbed GUI + animated spinner | ⚠️ compile-checked only |
+| `src/naive_timer/app.py` | PySide6 tabbed GUI + animated spinner | ⚠️ constructed offscreen only |
 
 Key model details worth knowing before editing:
 
@@ -65,24 +82,45 @@ Key model details worth knowing before editing:
 
 ## Open questions (waiting on in-person / on-workstation review)
 
-These are the "needs your eyes/ears" items that couldn't be judged remotely:
+Answered at the first local run:
 
-- [ ] **Chime**: right volume? too frequent? pleasant enough? (currently
-  volume 0.35, ~1.5 s clip on infinite loop)
-- [ ] **Visual alert**: is a red background flash the right level of
-  aggressiveness, or too much / not enough?
+- [x] **Visual alert**: the red flash is **too busy / jarring**. Superseded by
+  the shard treatment below — on finish the shard breaks apart and pulses to a
+  mostly-transparent dark red at ~1–2 Hz until reset.
+- [x] **Spinner**: the orbiting-dots ring is distracting and is being
+  **removed**, not kept alongside the 3D view.
+
+Still open:
+
+- [ ] **Chime**: still unheard (DSP was muted during the first run). Volume
+  0.35, ~1.5 s clip, infinite loop.
 - [ ] **Minutes-vs-seconds** default for bare numbers (see choice #1).
-- [ ] Whether to add a **countdown-specific config** (default sound file,
-  default alert duration) surfaced in the UI rather than just in code.
+- [ ] Whether to surface **config** (sound file, alert duration) in the UI.
+
+## Next: the 3D shard
+
+Replacing the spinner. The timer/stopwatch text becomes a **dynamic texture on
+the face of an angled glass shard**, lit from offscreen.
+
+- Route: `QOpenGLWidget` + hand-written GLSL (all of QtQuick3D / Qt3D /
+  QtWebEngine are installed via PySide6-Addons, but raw GL is the least fight
+  for custom lighting). Confirmed OpenGL 4.6 core on Mesa.
+- Text → `QPainter` into a `QImage` → `QOpenGLTexture` → sampled by the
+  fragment shader. **`format_elapsed` is the seam**: the models stay UI-free
+  and headlessly testable, and the GL widget is just another thin view.
+- Wanted knobs: **font face**, **numeral color**, and an optional **emissive
+  glow** vs. an etched/frosted look (undecided — needs to be seen).
+- On finish: shard fractures, then pulses transparent dark red at ~1–2 Hz until
+  the user resets or starts another timer.
 
 ## Running locally
 
 ```bash
-git checkout claude/mobile-code-git-workflow-aptdpv
-git pull
-pip install PySide6
-python -m unittest discover -s tests -v   # verify logic
-python -m naive_timer                      # see/hear the GUI
+sudo apt install libxcb-cursor0            # Qt 6.5+ xcb plugin dep; not in the wheel
+python3 -m venv .venv                      # system Python is externally managed
+.venv/bin/python -m pip install -e ".[dev]"
+.venv/bin/python -m unittest discover -s tests -v   # logic + offscreen GUI smoke
+.venv/bin/python -m naive_timer                     # see/hear the GUI
 ```
 
 ## Branch

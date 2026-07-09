@@ -292,7 +292,7 @@ class _AlertPlayer:
     def __init__(self) -> None:
         self._effect = QSoundEffect()
         self._effect.setSource(QUrl.fromLocalFile(sound.default_chime_path()))
-        self._effect.setLoopCount(QSoundEffect.Infinite)
+        self._effect.setLoopCount(QSoundEffect.Loop.Infinite.value)
         self._effect.setVolume(0.35)
 
     def play(self) -> None:
