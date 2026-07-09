@@ -183,12 +183,22 @@ Render and measure; do not reason about it. Each of these caught a real bug:
 - [ ] Keep the `uEtch` blend: the wanted look is etching *plus* an understated
   emissivity, not either/or.
 
-**Background** — its own branch, deliberately later
+**Background** — branch `feat/starfield`
 
-- [ ] **Starfield + nebulae** behind the shard, replacing the flat dark clear
-  colour. Easier to judge the glass against it once the glass has real depth.
-  Ignore the backgrounds in the `graphics/` reference images; only the shards
-  themselves are representative.
+- [x] **Starfield + nebulae**, generated procedurally in `shaders/sky.{vert,frag}`
+  and drawn as a fullscreen pass before the shard. No image asset: nothing to
+  license, and it resamples at any window size. Three star layers (hash grid,
+  rare bright stars via a high power, desynchronised twinkle) plus a
+  domain-warped fBm nebula. Costs 0.64 ms/frame for the *whole* scene at
+  420x620 — about 3.8% of a 60 fps budget.
+- The sky pass must run **before** `paintGL`'s early return for
+  `pieces_have_cleared`, or the backdrop disappears for the ~115 s the alert
+  outlives the shard. Pinned by a test.
+- `glClearColor` is black on purpose. The sky covers every pixel, so the clear
+  colour is only visible when the backdrop fails — and it should then look
+  obviously broken. It was previously a dark blue-grey *brighter* than the
+  nebula's own void colour, which made a "did the sky draw?" test pass even
+  with the sky pass deleted.
 
 **Sound** — deferred, see *Asset licensing* below
 

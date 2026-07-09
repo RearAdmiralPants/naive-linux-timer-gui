@@ -51,6 +51,12 @@ _SLIDERS = [
     ("base_alpha", 0.0, 1.0),
 ]
 
+_SKY_SLIDERS = [
+    ("nebula", 0.0, 1.5),
+    ("star_density", 4.0, 60.0),
+    ("star_brightness", 0.0, 2.0),
+]
+
 class _HexColorEdit(QLineEdit):
     """A 24-bit RRGGBB entry that only applies a value once it is valid.
 
@@ -91,28 +97,10 @@ class TuningPanel(QWidget):
         self.setMinimumWidth(320)
 
         outer = QVBoxLayout(self)
-
-        box = QGroupBox("Uniforms")
-        form = QFormLayout(box)
         self._labels: dict[str, QLabel] = {}
 
-        for name, lo, hi in _SLIDERS:
-            slider = QSlider(Qt.Horizontal)
-            slider.setRange(int(lo * 100), int(hi * 100))
-            slider.setValue(int(getattr(self._params, name) * 100))
-            label = QLabel(f"{getattr(self._params, name):.2f}")
-            self._labels[name] = label
-            slider.valueChanged.connect(
-                lambda v, n=name: self._on_slider(n, v / 100.0)
-            )
-            row = QWidget()
-            row_layout = QVBoxLayout(row)
-            row_layout.setContentsMargins(0, 0, 0, 0)
-            row_layout.addWidget(slider)
-            row_layout.addWidget(label)
-            form.addRow(name, row)
-
-        outer.addWidget(box)
+        outer.addWidget(self._slider_group("Glass", _SLIDERS))
+        outer.addWidget(self._slider_group("Sky", _SKY_SLIDERS))
 
         appearance = QGroupBox("Numerals")
         aform = QFormLayout(appearance)
@@ -142,12 +130,44 @@ class TuningPanel(QWidget):
         )
         aform.addRow("light", self._light_color)
 
+        self._nebula_a = _HexColorEdit(
+            self._params.nebula_color_a,
+            lambda c: self._set("nebula_color_a", c),
+        )
+        aform.addRow("nebula A", self._nebula_a)
+
+        self._nebula_b = _HexColorEdit(
+            self._params.nebula_color_b,
+            lambda c: self._set("nebula_color_b", c),
+        )
+        aform.addRow("nebula B", self._nebula_b)
+
         outer.addWidget(appearance)
 
         dump = QPushButton("Print params")
         dump.clicked.connect(self._dump)
         outer.addWidget(dump)
         outer.addStretch(1)
+
+    def _slider_group(self, title: str, specs) -> QGroupBox:
+        box = QGroupBox(title)
+        form = QFormLayout(box)
+        for name, lo, hi in specs:
+            slider = QSlider(Qt.Horizontal)
+            slider.setRange(int(lo * 100), int(hi * 100))
+            slider.setValue(int(getattr(self._params, name) * 100))
+            label = QLabel(f"{getattr(self._params, name):.2f}")
+            self._labels[name] = label
+            slider.valueChanged.connect(
+                lambda v, n=name: self._on_slider(n, v / 100.0)
+            )
+            row = QWidget()
+            row_layout = QVBoxLayout(row)
+            row_layout.setContentsMargins(0, 0, 0, 0)
+            row_layout.addWidget(slider)
+            row_layout.addWidget(label)
+            form.addRow(name, row)
+        return box
 
     def _on_slider(self, name: str, value: float) -> None:
         self._labels[name].setText(f"{value:.2f}")
@@ -169,9 +189,12 @@ class TuningPanel(QWidget):
     def _dump(self) -> None:
         p: ShardParams = self._params
         print("\n# --- paste into ShardParams defaults ---")
-        for name, _lo, _hi in _SLIDERS:
+        for name, _lo, _hi in _SLIDERS + _SKY_SLIDERS:
             print(f"    {name}: float = {getattr(p, name):.2f}")
-        for name in ("glass_color", "text_color", "light_color"):
+        for name in (
+            "glass_color", "text_color", "light_color",
+            "nebula_color_a", "nebula_color_b",
+        ):
             rgb = getattr(p, name)
             pretty = ", ".join(f"{c:.3f}" for c in rgb)
             print(f"    {name}: tuple = ({pretty})  # {format_hex_color(rgb)}")

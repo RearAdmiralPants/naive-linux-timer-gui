@@ -458,6 +458,39 @@ class GlTest(unittest.TestCase):
         )
         self.assertGreater(differing, 20, "light colour never reached the shader")
 
+    def test_sky_still_draws_after_the_pieces_have_cleared(self):
+        """paintGL returns early once the shard is gone. The sky must precede
+        that return, or the backdrop vanishes for the rest of the alert."""
+        from PySide6.QtWidgets import QApplication
+
+        from naive_timer.shard import ShardWidget
+
+        class Model:
+            is_running = False
+
+        shard = ShardWidget(Model())
+        shard.resize(160, 160)
+        shard.set_text("00:00:00.00")
+        shard.show()
+        QApplication.processEvents()
+
+        shard.set_alarm(True)
+        shard._shatter_t = 60.0        # long past _SHATTER_CLEAR_S
+        shard._elapsed = 3.0
+        self.assertTrue(shard.pieces_have_cleared)
+
+        shard.makeCurrent()
+        shard.paintGL()
+        image = shard.grabFramebuffer()
+
+        lit = sum(
+            1
+            for y in range(0, image.height(), 3)
+            for x in range(0, image.width(), 3)
+            if max(image.pixelColor(x, y).getRgb()[:3]) > 14
+        )
+        self.assertGreater(lit, 50, "the sky went dark when the shard left")
+
     def test_idle_rotation_ignores_whether_the_model_runs(self):
         """Speeding up on start drew the eye away from the numerals."""
         from naive_timer.shard import ShardWidget

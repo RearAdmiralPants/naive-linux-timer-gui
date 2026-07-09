@@ -30,6 +30,7 @@ from PySide6.QtGui import (
     QMatrix4x4,
     QPainter,
     QSurfaceFormat,
+    QVector2D,
     QVector3D,
 )
 from PySide6.QtOpenGL import (
@@ -55,6 +56,8 @@ _GL_DEPTH_BUFFER_BIT = 0x0100
 _GL_CULL_FACE = 0x0B44
 _GL_FRONT = 0x0404
 _GL_BACK = 0x0405
+_GL_FALSE = 0
+_GL_TRUE = 1
 
 # Texture the numerals are drawn into. Wide, because the readout is wide, and
 # oversized because the glyphs get magnified across the face of the shard.
@@ -165,6 +168,13 @@ class ShardParams:
     light_color: tuple = (1.00, 1.00, 1.00)
     font_family: str = "monospace"
     font_bold: bool = True
+
+    # Procedural backdrop.
+    nebula: float = 0.55
+    nebula_color_a: tuple = (0.10, 0.16, 0.42)
+    nebula_color_b: tuple = (0.42, 0.13, 0.34)
+    star_density: float = 26.0
+    star_brightness: float = 1.0
 
 
 def default_surface_format() -> QSurfaceFormat:
@@ -435,6 +445,10 @@ class ShardWidget(QOpenGLWidget):
 
         self._program: QOpenGLShaderProgram | None = None
         self._uniforms: dict[str, int] = {}
+        self._sky_program: QOpenGLShaderProgram | None = None
+        self._sky_uniforms: dict[str, int] = {}
+        self._sky_vao = QOpenGLVertexArrayObject()
+        self._elapsed = 0.0
         self._texture: QOpenGLTexture | None = None
         self._text_dirty = True
         self._shaders_dirty = False
@@ -447,7 +461,7 @@ class ShardWidget(QOpenGLWidget):
         self.setMinimumSize(280, 280)
 
         self._watcher = QFileSystemWatcher(self)
-        for name in ("shard.vert", "shard.frag"):
+        for name in ("shard.vert", "shard.frag", "sky.vert", "sky.frag"):
             self._watcher.addPath(str(_SHADER_DIR / name))
         self._watcher.fileChanged.connect(self._on_shader_changed)
 
@@ -473,6 +487,10 @@ class ShardWidget(QOpenGLWidget):
             self._alarm_phase = 0.0
 
     def advance(self, dt: float) -> None:
+        # The sky drifts and twinkles in every state, including after the
+        # shard has shattered and stopped being drawn.
+        self._elapsed += dt
+
         if self._alarm:
             # The pieces tumble away and keep going; the red pulse continues
             # long after they have left the frame, until the user resets.
@@ -555,6 +573,75 @@ class ShardWidget(QOpenGLWidget):
         if location >= 0:
             self._program.setUniformValue(location, value)
 
+    def _load_sky_program(self) -> None:
+        """Compile the backdrop shaders. Keep the old program if this fails."""
+        program = QOpenGLShaderProgram()
+        ok = program.addShaderFromSourceFile(
+            QOpenGLShader.Vertex, str(_SHADER_DIR / "sky.vert")
+        ) and program.addShaderFromSourceFile(
+            QOpenGLShader.Fragment, str(_SHADER_DIR / "sky.frag")
+        )
+        if ok:
+            ok = program.link()
+
+        if not ok:
+            log = program.log().strip()
+            if self._sky_program is None:
+                raise RuntimeError(f"initial sky shader compile failed:\n{log}")
+            print(f"[sky] shader reload failed, keeping previous:\n{log}")
+            return
+
+        program.bind()
+        self._sky_uniforms = {
+            name: program.uniformLocation(name)
+            for name in (
+                "uResolution", "uTime", "uNebula", "uNebulaColorA",
+                "uNebulaColorB", "uStarDensity", "uStarBrightness",
+            )
+        }
+        program.release()
+        self._sky_program = program
+        print("[sky] shaders reloaded")
+
+    def _draw_sky(self, fns) -> None:
+        """Fullscreen backdrop. No depth, no blending, no vertex buffer."""
+        program = self._sky_program
+        if program is None:
+            return
+
+        p = self.params
+        fns.glDisable(_GL_DEPTH_TEST)
+        fns.glDisable(_GL_BLEND)
+        fns.glDepthMask(_GL_FALSE)
+
+        program.bind()
+        for name, value in (
+            ("uTime", float(self._elapsed)),
+            ("uNebula", float(p.nebula)),
+            ("uStarDensity", float(p.star_density)),
+            ("uStarBrightness", float(p.star_brightness)),
+        ):
+            loc = self._sky_uniforms.get(name, -1)
+            if loc >= 0:
+                program.setUniformValue1f(loc, value)
+        for name, value in (
+            ("uResolution", QVector2D(float(self.width()), float(self.height()))),
+            ("uNebulaColorA", QVector3D(*p.nebula_color_a)),
+            ("uNebulaColorB", QVector3D(*p.nebula_color_b)),
+        ):
+            loc = self._sky_uniforms.get(name, -1)
+            if loc >= 0:
+                program.setUniformValue(loc, value)
+
+        self._sky_vao.bind()
+        fns.glDrawArrays(_GL_TRIANGLES, 0, 3)
+        self._sky_vao.release()
+        program.release()
+
+        fns.glDepthMask(_GL_TRUE)
+        fns.glEnable(_GL_DEPTH_TEST)
+        fns.glEnable(_GL_BLEND)
+
     def _set_float(self, name: str, value: float) -> None:
         """Set a float uniform.
 
@@ -611,7 +698,10 @@ class ShardWidget(QOpenGLWidget):
         fns.glEnable(_GL_DEPTH_TEST)
         fns.glEnable(_GL_BLEND)
         fns.glBlendFunc(_GL_SRC_ALPHA, _GL_ONE_MINUS_SRC_ALPHA)
-        fns.glClearColor(0.05, 0.06, 0.09, 1.0)
+        # Black, not a dark blue-grey. The sky pass covers every pixel, so this
+        # is only ever seen if the backdrop fails to draw -- and it should look
+        # unmistakably broken when that happens, not like a slightly dim sky.
+        fns.glClearColor(0.0, 0.0, 0.0, 1.0)
 
         self._vao.create()
         self._vbo.create()
@@ -621,24 +711,34 @@ class ShardWidget(QOpenGLWidget):
         )
         self._vbo.release()
 
+        # Core profile requires a bound VAO for any draw, even one that fetches
+        # no attributes. The sky triangle builds itself from gl_VertexID.
+        self._sky_vao.create()
+
         self._load_program()
+        self._load_sky_program()
 
     def paintGL(self) -> None:  # noqa: N802
         if self._shaders_dirty:
             self._shaders_dirty = False
             self._load_program()
+            self._load_sky_program()
         if self._text_dirty:
             self._upload_text()
 
         fns = self.context().functions()
         fns.glClear(_GL_COLOR_BUFFER_BIT | _GL_DEPTH_BUFFER_BIT)
 
+        # Backdrop first, and unconditionally: the shard may be gone, but the
+        # sky is still there.
+        self._draw_sky(fns)
+
         program = self._program
         if program is None or self._texture is None:
             return
 
         # The wedges have tumbled out of frame. The alert still has ~115 s to
-        # run; there is nothing left to rasterise.
+        # run; there is nothing left of the shard to rasterise.
         if self.pieces_have_cleared:
             return
 
