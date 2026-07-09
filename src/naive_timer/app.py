@@ -9,11 +9,10 @@ Run with:  python -m naive_timer
 
 from __future__ import annotations
 
-import math
 import sys
 
-from PySide6.QtCore import Qt, QTimer, QPointF, QUrl
-from PySide6.QtGui import QColor, QFont, QLinearGradient, QPainter, QPen
+from PySide6.QtCore import Qt, QTimer, QUrl
+from PySide6.QtGui import QSurfaceFormat
 from PySide6.QtWidgets import (
     QApplication,
     QComboBox,
@@ -27,8 +26,9 @@ from PySide6.QtWidgets import (
 )
 
 from .countdown import Countdown, parse_alarm, parse_duration
+from .shard import ShardParams, ShardWidget, default_surface_format
 from .stopwatch import State, Stopwatch, format_elapsed
-from . import sound
+from . import sound, tuning
 
 # ~60 FPS refresh for smooth animation.
 FRAME_MS = 16
@@ -42,85 +42,11 @@ except Exception:  # pragma: no cover - depends on platform Qt build
     _HAVE_AUDIO = False
 
 
-class SpinnerWidget(QWidget):
-    """A naive pseudo-3D ring that spins faster while its model is running.
-
-    ``model`` only needs an ``is_running`` boolean.
-    """
-
-    def __init__(self, model) -> None:
-        super().__init__()
-        self._model = model
-        self._angle = 0.0
-        self._alarm = False
-        self.setMinimumSize(240, 240)
-
-    def set_alarm(self, active: bool) -> None:
-        self._alarm = active
-
-    def advance(self, dt: float) -> None:
-        if self._alarm:
-            speed = 360.0
-        elif self._model.is_running:
-            speed = 220.0
-        else:
-            speed = 30.0
-        self._angle = (self._angle + speed * dt) % 360.0
-        self.update()
-
-    def paintEvent(self, event) -> None:  # noqa: N802 (Qt naming)
-        p = QPainter(self)
-        p.setRenderHint(QPainter.Antialiasing)
-
-        rect = self.rect()
-        cx, cy = rect.width() / 2.0, rect.height() / 2.0
-        radius = min(cx, cy) - 20.0
-
-        pulse = 1.0 + 0.06 * math.sin(math.radians(self._angle * 3))
-        r = radius * pulse
-
-        grad = QLinearGradient(cx - r, cy - r, cx + r, cy + r)
-        if self._alarm:
-            grad.setColorAt(0.0, QColor(255, 70, 70))
-            grad.setColorAt(1.0, QColor(255, 180, 40))
-        else:
-            base = 200 if self._model.is_running else 120
-            grad.setColorAt(0.0, QColor(80, base, 255))
-            grad.setColorAt(1.0, QColor(255, 80, base))
-        pen = QPen(grad, 10)
-        pen.setCapStyle(Qt.RoundCap)
-        p.setPen(pen)
-        p.drawEllipse(QPointF(cx, cy), r, r)
-
-        p.setPen(Qt.NoPen)
-        for i in range(6):
-            a = math.radians(self._angle + i * 60.0)
-            depth = 0.6 + 0.4 * math.cos(a)
-            dx = cx + r * math.cos(a)
-            dy = cy + r * math.sin(a)
-            dot = 6.0 + 6.0 * depth
-            color = QColor(255, 255, 255, int(120 + 135 * depth))
-            p.setBrush(color)
-            p.drawEllipse(QPointF(dx, dy), dot, dot)
-        p.end()
-
-
-def _display_font() -> QFont:
-    font = QFont("monospace")
-    font.setPointSize(36)
-    font.setBold(True)
-    return font
-
-
 class StopwatchWidget(QWidget):
-    def __init__(self) -> None:
+    def __init__(self, params: ShardParams | None = None) -> None:
         super().__init__()
         self._sw = Stopwatch()
-        self._spinner = SpinnerWidget(self._sw)
-
-        self._display = QLabel(format_elapsed(0))
-        self._display.setAlignment(Qt.AlignCenter)
-        self._display.setFont(_display_font())
+        self._shard = ShardWidget(self._sw, params)
 
         self._start_btn = QPushButton("Start")
         self._start_btn.clicked.connect(self._on_toggle)
@@ -132,8 +58,7 @@ class StopwatchWidget(QWidget):
         buttons.addWidget(reset_btn)
 
         layout = QVBoxLayout(self)
-        layout.addWidget(self._spinner, stretch=1)
-        layout.addWidget(self._display)
+        layout.addWidget(self._shard, stretch=1)
         layout.addLayout(buttons)
 
         timer = QTimer(self)
@@ -151,17 +76,17 @@ class StopwatchWidget(QWidget):
         self._start_btn.setText("Start")
 
     def _tick(self) -> None:
-        self._spinner.advance(FRAME_MS / 1000.0)
-        self._display.setText(format_elapsed(self._sw.elapsed()))
+        self._shard.set_text(format_elapsed(self._sw.elapsed()))
+        self._shard.advance(FRAME_MS / 1000.0)
 
 
 class TimerWidget(QWidget):
     """Countdown that accepts a duration ('12m') or an alarm time ('02:54')."""
 
-    def __init__(self) -> None:
+    def __init__(self, params: ShardParams | None = None) -> None:
         super().__init__()
         self._cd = Countdown()
-        self._spinner = SpinnerWidget(self._cd)
+        self._shard = ShardWidget(self._cd, params)
         self._alerting = False
         self._alert = _AlertPlayer() if _HAVE_AUDIO else None
 
@@ -175,10 +100,6 @@ class TimerWidget(QWidget):
         input_row = QHBoxLayout()
         input_row.addWidget(self._mode)
         input_row.addWidget(self._input, stretch=1)
-
-        self._display = QLabel(format_elapsed(0))
-        self._display.setAlignment(Qt.AlignCenter)
-        self._display.setFont(_display_font())
 
         self._status = QLabel("")
         self._status.setAlignment(Qt.AlignCenter)
@@ -198,8 +119,7 @@ class TimerWidget(QWidget):
 
         layout = QVBoxLayout(self)
         layout.addLayout(input_row)
-        layout.addWidget(self._spinner, stretch=1)
-        layout.addWidget(self._display)
+        layout.addWidget(self._shard, stretch=1)
         layout.addWidget(self._status)
         layout.addLayout(buttons)
 
@@ -254,23 +174,19 @@ class TimerWidget(QWidget):
     def _stop_alert(self) -> None:
         self._alerting = False
         self._dismiss_btn.setVisible(False)
-        self._spinner.set_alarm(False)
-        self.setStyleSheet("")
+        self._shard.set_alarm(False)
         if self._alert is not None:
             self._alert.stop()
 
     def _tick(self) -> None:
-        self._spinner.advance(FRAME_MS / 1000.0)
-        self._display.setText(format_elapsed(self._cd.remaining()))
+        self._shard.set_text(format_elapsed(self._cd.remaining()))
+        self._shard.advance(FRAME_MS / 1000.0)
 
+        # The alert is carried entirely by the shard: it fractures, then
+        # breathes dark red. No background flash -- that read as jarring.
         if self._cd.alert_active():
             if not self._alerting:
                 self._begin_alert()
-            # Flash the background for a visible pulse.
-            flash = (self._spinner._angle % 60) < 30
-            self.setStyleSheet(
-                "background-color:#5a1414;" if flash else "background-color:#2a0a0a;"
-            )
         elif self._alerting:
             # Alert window elapsed on its own.
             self._stop_alert()
@@ -281,7 +197,7 @@ class TimerWidget(QWidget):
         self._status.setText("⏰ Time's up!")
         self._start_btn.setText("Start")
         self._dismiss_btn.setVisible(True)
-        self._spinner.set_alarm(True)
+        self._shard.set_alarm(True)
         if self._alert is not None:
             self._alert.play()
 
@@ -306,15 +222,33 @@ class MainWindow(QTabWidget):
     def __init__(self) -> None:
         super().__init__()
         self.setWindowTitle("Naive Linux Timer")
-        self.addTab(StopwatchWidget(), "Stopwatch")
-        self.addTab(TimerWidget(), "Timer")
+        # One ShardParams shared by both tabs, so the tuning panel moves both
+        # shards at once. Tuning only the Timer tab looked like a dead slider
+        # whenever the Stopwatch tab was in front.
+        self.shard_params = ShardParams()
+        self.stopwatch_tab = StopwatchWidget(self.shard_params)
+        self.timer_tab = TimerWidget(self.shard_params)
+        self.addTab(self.stopwatch_tab, "Stopwatch")
+        self.addTab(self.timer_tab, "Timer")
+
+    def shards(self) -> list[ShardWidget]:
+        return [self.stopwatch_tab._shard, self.timer_tab._shard]
 
 
 def main() -> int:
+    # Must precede QApplication: the GL context is chosen at widget creation.
+    QSurfaceFormat.setDefaultFormat(default_surface_format())
+
     app = QApplication(sys.argv)
     window = MainWindow()
-    window.resize(360, 560)
+    window.resize(420, 620)
     window.show()
+
+    panel = None
+    if tuning.enabled():
+        panel = tuning.TuningPanel(window.shards())
+        panel.show()
+
     return app.exec()
 
 

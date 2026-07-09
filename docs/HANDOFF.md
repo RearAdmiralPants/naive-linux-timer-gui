@@ -90,12 +90,37 @@ Answered at the first local run:
 - [x] **Spinner**: the orbiting-dots ring is distracting and is being
   **removed**, not kept alongside the 3D view.
 
+- [x] **Chime**: approved. "As subtle as I wanted." Leave volume at 0.35.
+- [x] **Etched vs. emissive**: both wanted -- etching, plus an *understated*
+  emissivity. Not either/or; the `uEtch` blend stays.
+
 Still open:
 
-- [ ] **Chime**: still unheard (DSP was muted during the first run). Volume
-  0.35, ~1.5 s clip, infinite loop.
 - [ ] **Minutes-vs-seconds** default for bare numbers (see choice #1).
 - [ ] Whether to surface **config** (sound file, alert duration) in the UI.
+- [ ] **Etch pixelation at grazing angles.** `shard.frag` scales the glyph
+  coverage gradient (`dFdx`/`dFdy`) by a flat `18.0`. Screen-space derivatives
+  blow up where the face turns away from the camera, so the engraving edges
+  alias. Needs clamping, or a gradient computed in texture space.
+- [ ] **Hex RRGGBB entry** for text/glow colour, and an adjustable **light
+  colour** (currently white, implicit in the shader).
+
+## Asset licensing (read before adding any binary)
+
+`graphics/` and `audio/` are **gitignored on purpose.** They hold third-party
+reference material: a watermarked Adobe Stock comp, Craiyon output, and glass
+shatter recordings captured from YouTube. A modified copy of a copyrighted
+recording (resampled, attenuated, time-stretched) is still a derivative work,
+so those FLACs cannot ship in an MIT-licensed app, not just cannot be
+committed.
+
+Shipped audio must be **CC0/public domain** with an `audio/CREDITS.md`, or
+**synthesized at runtime** the way `sound.py` generates the chime. The latter
+also keeps the repo binary-free, which is what lets it be developed headlessly.
+
+Note also: **`QSoundEffect` only decodes uncompressed WAV.** Pointing it at a
+FLAC yields `Status.Error` and silence. Playing compressed audio needs
+`QMediaPlayer` + `QAudioOutput`.
 
 ## Next: the 3D shard
 

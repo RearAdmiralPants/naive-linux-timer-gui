@@ -67,16 +67,40 @@ tested anywhere, with no third-party packages:
 python -m unittest discover -s tests -v
 ```
 
-`tests/test_gui_smoke.py` additionally constructs the Qt widgets under
-`QT_QPA_PLATFORM=offscreen`. It needs PySide6 installed but **no display**, so
-it runs in CI and cloud containers; it skips itself if PySide6 is absent. It
-exists because the model tests can be entirely green while the app crashes on
-startup — which is exactly what happened once.
+`tests/test_gui_smoke.py` additionally constructs the Qt objects. It exists
+because the model tests can be entirely green while the app crashes on startup
+— which is exactly what happened once.
+
+It has two tiers, because Qt's `offscreen` platform has **no OpenGL**, and
+constructing a `QOpenGLWidget` under it *segfaults* rather than raising:
 
 ```bash
-.venv/bin/python -m unittest discover -s tests -v   # includes the GUI smoke test
-.venv/bin/python -m pytest                          # same, via pytest
+# Tier 1 only. Alert player, shard geometry, text texture. Skips the GL tier.
+.venv/bin/python -m unittest discover -s tests -v
+
+# Both tiers, still headless: a virtual X server gives real GL via Mesa.
+xvfb-run -a .venv/bin/python -m unittest discover -s tests -v
 ```
+
+With a display attached, both tiers run automatically. Use the `xvfb-run` form
+in CI and cloud containers — otherwise the shard is never actually constructed.
+
+## Tuning the shard
+
+The timer text is rendered as a texture on the face of a lit glass shard. Its
+fragment shader lives in `src/naive_timer/shaders/shard.frag` and is
+**hot-reloaded**: edit it while the app runs and it recompiles on save. A
+shader that fails to compile prints the error and leaves the previous one
+running, so you cannot break the app from there.
+
+```bash
+NAIVE_TIMER_TUNE=1 .venv/bin/python -m naive_timer
+```
+
+That adds a panel with live sliders for every uniform — light position,
+specular power, Fresnel, glow, and an etched↔emissive blend — plus font and
+colour pickers. **Print params** dumps the current values to the console in a
+form you can paste back into `ShardParams`.
 
 ## Layout
 

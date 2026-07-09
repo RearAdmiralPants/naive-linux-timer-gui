@@ -21,3 +21,16 @@ htmlcov/
 .vscode/
 *.swp
 .DS_Store
+
+# Local reference material and scratch assets -- deliberately NOT tracked.
+#
+# graphics/ holds third-party reference images (one is a watermarked Adobe
+# Stock comp, one is Craiyon output). audio/ holds recordings captured from
+# YouTube. Neither is licensed for redistribution, and a modified copy of a
+# copyrighted recording is still a derivative work. Committing them would put
+# them in git history permanently.
+#
+# Shipped audio must be either public domain / CC0 (with audio/CREDITS.md) or
+# synthesized at runtime the way sound.py generates the chime.
+graphics/
+audio/
