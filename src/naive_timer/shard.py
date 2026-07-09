@@ -30,7 +30,6 @@ from PySide6.QtGui import (
     QMatrix4x4,
     QPainter,
     QSurfaceFormat,
-    QVector2D,
     QVector3D,
 )
 from PySide6.QtOpenGL import (
@@ -115,9 +114,10 @@ _FLOATS_PER_VERTEX = 18
 # + 1 back face + 8 radial caps (4 per cut plane).
 _TRIS_PER_WEDGE = 16
 
-# Radians per second the shard turns while idle. Constant: it does not react
-# to the model's running state.
-_IDLE_SPIN_RATE = 0.12
+# Vertical field of view, degrees. Shared by the projection and by the sky's
+# per-pixel ray reconstruction -- they must agree or the backdrop will not line
+# up with the geometry.
+_FOV_DEGREES = 38.0
 
 # Seconds for the pieces to clear the frame -- measured by rendering the
 # sequence and counting non-background pixels, not guessed. The alert runs for
@@ -169,11 +169,30 @@ class ShardParams:
     font_family: str = "monospace"
     font_bold: bool = True
 
-    # Procedural backdrop.
-    nebula: float = 0.55
+    # Camera. It sways back and forth across the front of the shard, always
+    # looking at it -- rather than orbiting all the way round, which would
+    # leave the numerals edge-on or mirrored for half of every cycle. This is a
+    # timer: the readout has to stay readable.
+    #
+    # Set sway_degrees to 180 for a full orbit, if you want the sculpture
+    # rather than the clock.
+    orbit_speed: float = 0.22      # radians/sec of *phase*, not of angle
+    orbit_radius: float = 3.2
+    orbit_height: float = 0.55
+    sway_degrees: float = 30.0     # half-width of the arc, either side of front
+    orbit_bob: float = 0.30        # how far the eye rises and falls
+
+    # The shard's own idle rotation, on top of the orbit. Zero by default now
+    # that the camera moves -- two rotations at once is a lot of motion.
+    idle_spin: float = 0.0
+
+    # Procedural backdrop. star_density counts cells across the whole celestial
+    # sphere now that the sky is 3D, so it needs to be far larger than the
+    # screen-space version wanted.
+    nebula: float = 0.40
     nebula_color_a: tuple = (0.10, 0.16, 0.42)
     nebula_color_b: tuple = (0.42, 0.13, 0.34)
-    star_density: float = 26.0
+    star_density: float = 90.0
     star_brightness: float = 1.0
 
 
@@ -500,7 +519,7 @@ class ShardWidget(QOpenGLWidget):
             # One idle speed, whether or not the model is running. Speeding up
             # while the timer ran drew the eye to the rotation instead of the
             # numerals.
-            self._spin += dt * _IDLE_SPIN_RATE
+            self._spin += dt * self.params.idle_spin
         self.update()
 
     @property
@@ -595,13 +614,45 @@ class ShardWidget(QOpenGLWidget):
         self._sky_uniforms = {
             name: program.uniformLocation(name)
             for name in (
-                "uResolution", "uTime", "uNebula", "uNebulaColorA",
-                "uNebulaColorB", "uStarDensity", "uStarBrightness",
+                "uTime", "uNebula", "uNebulaColorA", "uNebulaColorB",
+                "uStarDensity", "uStarBrightness",
+                "uCamRight", "uCamUp", "uCamForward", "uTanHalfFov", "uAspect",
             )
         }
         program.release()
         self._sky_program = program
         print("[sky] shaders reloaded")
+
+    def camera(self) -> tuple:
+        """Where the camera is and which way it faces, right now.
+
+        Sways across the front of the shard rather than orbiting it, and always
+        looks at the origin. A sine sweep eases naturally at the extremes, so
+        the reversal has no visible corner.
+
+        Returns ``(eye, right, up, forward)`` in world space. Both passes use
+        this: the shard for its view matrix, the sky to rebuild a view ray per
+        pixel. They must agree, or the backdrop slides against the geometry.
+        """
+        p = self.params
+        phase = self._elapsed * p.orbit_speed
+        angle = math.radians(p.sway_degrees) * math.sin(phase)
+
+        # Bob at a different rate from the sway, so the two never resynchronise
+        # into an obvious figure-of-eight.
+        height = p.orbit_height + p.orbit_bob * math.sin(phase * 0.61)
+
+        eye = QVector3D(
+            p.orbit_radius * math.sin(angle),
+            height,
+            p.orbit_radius * math.cos(angle),
+        )
+
+        forward = (QVector3D(0.0, 0.0, 0.0) - eye).normalized()
+        world_up = QVector3D(0.0, 1.0, 0.0)
+        right = QVector3D.crossProduct(forward, world_up).normalized()
+        up = QVector3D.crossProduct(right, forward).normalized()
+        return eye, right, up, forward
 
     def _draw_sky(self, fns) -> None:
         """Fullscreen backdrop. No depth, no blending, no vertex buffer."""
@@ -610,6 +661,9 @@ class ShardWidget(QOpenGLWidget):
             return
 
         p = self.params
+        _eye, right, up, forward = self.camera()
+        aspect = max(self.width(), 1) / max(self.height(), 1)
+        tan_half_fov = math.tan(math.radians(_FOV_DEGREES) / 2.0)
         fns.glDisable(_GL_DEPTH_TEST)
         fns.glDisable(_GL_BLEND)
         fns.glDepthMask(_GL_FALSE)
@@ -620,12 +674,16 @@ class ShardWidget(QOpenGLWidget):
             ("uNebula", float(p.nebula)),
             ("uStarDensity", float(p.star_density)),
             ("uStarBrightness", float(p.star_brightness)),
+            ("uTanHalfFov", float(tan_half_fov)),
+            ("uAspect", float(aspect)),
         ):
             loc = self._sky_uniforms.get(name, -1)
             if loc >= 0:
                 program.setUniformValue1f(loc, value)
         for name, value in (
-            ("uResolution", QVector2D(float(self.width()), float(self.height()))),
+            ("uCamRight", right),
+            ("uCamUp", up),
+            ("uCamForward", forward),
             ("uNebulaColorA", QVector3D(*p.nebula_color_a)),
             ("uNebulaColorB", QVector3D(*p.nebula_color_b)),
         ):
@@ -745,16 +803,17 @@ class ShardWidget(QOpenGLWidget):
         p = self.params
         aspect = max(self.width(), 1) / max(self.height(), 1)
 
+        # The shard sits still in world space; the camera moves around it. The
+        # old fixed model rotation is gone -- tilting the object *and* orbiting
+        # the eye fights itself.
         model = QMatrix4x4()
-        model.rotate(-16.0, 1.0, 0.0, 0.0)
-        model.rotate(-22.0, 0.0, 1.0, 0.0)
 
+        cam, _right, _up, _forward = self.camera()
         view = QMatrix4x4()
-        cam = QVector3D(0.0, 0.0, 3.2)
         view.lookAt(cam, QVector3D(0, 0, 0), QVector3D(0, 1, 0))
 
         proj = QMatrix4x4()
-        proj.perspective(38.0, aspect, 0.1, 100.0)
+        proj.perspective(_FOV_DEGREES, aspect, 0.1, 100.0)
 
         alarm = 0.0
         if self._alarm:

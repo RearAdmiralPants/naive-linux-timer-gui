@@ -1,7 +1,12 @@
 #version 330 core
 
-// Procedural starfield and nebulae. No image asset: nothing to license, and it
-// resamples cleanly at any window size.
+// Procedural starfield and nebulae, evaluated in WORLD SPACE along a per-pixel
+// view ray. This is a skybox, not a wallpaper: the stars and clouds live on the
+// celestial sphere, so an orbiting camera sweeps across them.
+//
+// They sit at effectively infinite distance, so they rotate with the view
+// direction but never translate -- which is exactly how a real starfield
+// behaves, and why there is no parallax between them and the shard.
 //
 // EDIT ME -- hot-reloaded on save, like shard.frag. A failed compile prints
 // the error and keeps the last good program.
@@ -9,99 +14,126 @@
 in vec2 vUV;
 out vec4 FragColor;
 
-uniform vec2 uResolution;
+// Camera basis, world space. The ray is rebuilt from these each pixel.
+uniform vec3 uCamRight;
+uniform vec3 uCamUp;
+uniform vec3 uCamForward;
+uniform float uTanHalfFov;
+uniform float uAspect;
+
 uniform float uTime;
 
 uniform float uNebula;        // 0 = empty space, 1 = thick cloud
 uniform vec3 uNebulaColorA;   // the cool lobe
 uniform vec3 uNebulaColorB;   // the warm lobe
-uniform float uStarDensity;   // cells per unit; more cells, more stars
+uniform float uStarDensity;   // cells per unit of direction; more = more stars
 uniform float uStarBrightness;
 
 // The void is not pure black; a hint of blue reads as depth rather than as an
 // unlit buffer.
 const vec3 VOID_COLOR = vec3(0.020, 0.024, 0.038);
 
-float hash21(vec2 p) {
-    p = fract(p * vec2(123.34, 456.21));
-    p += dot(p, p + 45.32);
-    return fract(p.x * p.y);
+float hash31(vec3 p) {
+    p = fract(p * vec3(127.1, 311.7, 74.7));
+    p += dot(p, p.yzx + 34.53);
+    return fract((p.x + p.y) * p.z);
 }
 
-vec2 hash22(vec2 p) {
-    float n = hash21(p);
-    return vec2(n, hash21(p + n));
+vec3 hash33(vec3 p) {
+    float a = hash31(p);
+    float b = hash31(p + a + 1.7);
+    return vec3(a, b, hash31(p + b + 5.3));
 }
 
-// Value noise: smooth interpolation between per-lattice-point randoms.
-float noise(vec2 p) {
-    vec2 i = floor(p);
-    vec2 f = fract(p);
+// 3D value noise: smooth interpolation between per-lattice-point randoms.
+float noise3(vec3 p) {
+    vec3 i = floor(p);
+    vec3 f = fract(p);
     f = f * f * (3.0 - 2.0 * f);          // smoothstep, kills lattice creases
-    float a = hash21(i);
-    float b = hash21(i + vec2(1.0, 0.0));
-    float c = hash21(i + vec2(0.0, 1.0));
-    float d = hash21(i + vec2(1.0, 1.0));
-    return mix(mix(a, b, f.x), mix(c, d, f.x), f.y);
+
+    float n000 = hash31(i + vec3(0.0, 0.0, 0.0));
+    float n100 = hash31(i + vec3(1.0, 0.0, 0.0));
+    float n010 = hash31(i + vec3(0.0, 1.0, 0.0));
+    float n110 = hash31(i + vec3(1.0, 1.0, 0.0));
+    float n001 = hash31(i + vec3(0.0, 0.0, 1.0));
+    float n101 = hash31(i + vec3(1.0, 0.0, 1.0));
+    float n011 = hash31(i + vec3(0.0, 1.0, 1.0));
+    float n111 = hash31(i + vec3(1.0, 1.0, 1.0));
+
+    return mix(
+        mix(mix(n000, n100, f.x), mix(n010, n110, f.x), f.y),
+        mix(mix(n001, n101, f.x), mix(n011, n111, f.x), f.y),
+        f.z
+    );
 }
 
-float fbm(vec2 p) {
+float fbm3(vec3 p) {
     float sum = 0.0;
     float amp = 0.5;
     for (int i = 0; i < 5; i++) {
-        sum += amp * noise(p);
+        sum += amp * noise3(p);
         p *= 2.03;                         // not exactly 2: avoids axis banding
         amp *= 0.5;
     }
     return sum;
 }
 
-// One layer of stars. The plane is diced into cells; each holds at most one
-// star, placed and lit by the cell's hash. Bright stars are made rare by
-// raising a uniform random to a high power.
-float starLayer(vec2 p, float density, float radius, float seed) {
-    vec2 grid = p * density + seed;
-    vec2 cell = floor(grid);
-    vec2 local = fract(grid);
+// One layer of stars on the celestial sphere. Direction space is diced into
+// cells; each holds at most one star, placed and lit by the cell's hash.
+// Bright stars are made rare by raising a uniform random to a high power.
+float starLayer(vec3 dir, float density, float radius, float seed) {
+    vec3 grid = dir * density + seed;
+    vec3 cell = floor(grid);
+    vec3 local = fract(grid);
 
-    vec2 offset = hash22(cell) * 0.7 + 0.15;
-    float brightness = pow(hash21(cell + 13.7), 7.0);
+    vec3 offset = hash33(cell) * 0.7 + 0.15;
+    float brightness = pow(hash31(cell + 13.7), 7.0);
 
     float d = length(local - offset);
     float core = smoothstep(radius, 0.0, d);
 
     // Twinkle, desynchronised per star.
-    float phase = hash21(cell + 3.1) * 6.2831853;
+    float phase = hash31(cell + 3.1) * 6.2831853;
     float twinkle = 0.78 + 0.22 * sin(uTime * 1.7 + phase);
 
     return core * brightness * twinkle;
 }
 
 void main() {
-    // Aspect-correct, so stars stay round and the nebula does not stretch when
-    // the window is resized.
-    float aspect = uResolution.x / max(uResolution.y, 1.0);
-    vec2 p = (vUV - 0.5) * vec2(aspect, 1.0);
+    // Rebuild the world-space view ray for this pixel. Aspect correction lives
+    // here, so stars stay round when the window is resized.
+    vec2 ndc = vUV * 2.0 - 1.0;
+    vec3 dir = normalize(
+        uCamForward
+        + uCamRight * (ndc.x * uTanHalfFov * uAspect)
+        + uCamUp * (ndc.y * uTanHalfFov)
+    );
 
     vec3 color = VOID_COLOR;
 
     // Nebula. A second fbm displaces the first (domain warping), which is what
-    // turns round blobs into filaments and wisps.
-    vec2 drift = vec2(uTime * 0.006, uTime * 0.0025);
-    float base = fbm(p * 2.3 + drift);
-    float warped = fbm(p * 3.1 + base * 1.6 - drift);
+    // turns round blobs into filaments and wisps. The slow drift is the clouds
+    // themselves moving, not the camera.
+    vec3 drift = vec3(uTime * 0.004, uTime * 0.0015, uTime * 0.002);
+    float base = fbm3(dir * 2.3 + drift);
+    float warped = fbm3(dir * 3.1 + base * 1.6 - drift);
 
-    // A wide, low threshold. Clamping hard at the top left one faint smudge in
-    // a corner instead of cloud across the frame.
-    float density = smoothstep(0.28, 0.78, warped) * uNebula;
+    // 3D fbm covers far more of the frame than the 2D version did, so the
+    // threshold has to climb or the nebula becomes a wash rather than wisps.
+    float density = smoothstep(0.40, 0.88, warped) * uNebula;
     vec3 cloud = mix(uNebulaColorA, uNebulaColorB, smoothstep(0.25, 0.75, base));
     color += cloud * density;
 
     // Three star layers at different scales read as depth.
+    //
+    // The radii are in cell units, and a cell now subtends roughly
+    // 1/uStarDensity radians. Too small and a star lands inside a single pixel
+    // and flickers out of existence; these keep the core a couple of pixels
+    // across at the default density.
     float stars = 0.0;
-    stars += starLayer(p, uStarDensity * 0.6, 0.055, 0.0) * 1.00;
-    stars += starLayer(p, uStarDensity * 1.3, 0.040, 17.0) * 0.65;
-    stars += starLayer(p, uStarDensity * 2.4, 0.030, 41.0) * 0.40;
+    stars += starLayer(dir, uStarDensity * 0.6, 0.170, 0.0) * 1.00;
+    stars += starLayer(dir, uStarDensity * 1.3, 0.130, 17.0) * 0.65;
+    stars += starLayer(dir, uStarDensity * 2.4, 0.095, 41.0) * 0.40;
     color += vec3(stars) * uStarBrightness;
 
     // The nebula sits in front of the faintest stars, as dust does.

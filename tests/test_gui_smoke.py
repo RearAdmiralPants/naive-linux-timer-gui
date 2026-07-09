@@ -414,6 +414,66 @@ class GlTest(unittest.TestCase):
         shard.set_alarm(False)
         self.assertEqual(shard._shatter_t, 0.0, "reset reassembles the shard")
 
+    def test_camera_never_swings_behind_the_numerals(self):
+        """This is a timer. The readout must stay legible at every phase.
+
+        A full 360 degree orbit leaves the front face edge-on or mirrored for
+        half of each cycle, so the camera sways instead. Sampled across a whole
+        period, the front face (+z in world space) must stay well toward the
+        camera.
+        """
+        import math
+
+        from PySide6.QtGui import QVector3D
+
+        from naive_timer.shard import ShardWidget
+
+        class Model:
+            is_running = False
+
+        shard = ShardWidget(Model())
+        period = 2 * math.pi / shard.params.orbit_speed
+
+        worst = 1.0
+        for i in range(64):
+            shard._elapsed = period * i / 64
+            eye, _right, _up, _forward = shard.camera()
+            facing = QVector3D.dotProduct(QVector3D(0, 0, 1), eye.normalized())
+            worst = min(worst, facing)
+
+        # cos(60 deg) = 0.5. Anything less and the readout is badly raked.
+        self.assertGreater(
+            worst, 0.5, f"camera rakes the numerals too far (facing {worst:.3f})"
+        )
+
+    def test_sky_and_shard_share_one_camera(self):
+        """If the two passes disagree, the backdrop slides against the glass."""
+        import math
+
+        from naive_timer.shard import ShardWidget
+
+        class Model:
+            is_running = False
+
+        shard = ShardWidget(Model())
+        shard._elapsed = 4.0
+        eye, right, up, forward = shard.camera()
+
+        # An orthonormal, right-handed basis pointing at the origin.
+        self.assertAlmostEqual(forward.length(), 1.0, places=5)
+        self.assertAlmostEqual(right.length(), 1.0, places=5)
+        self.assertAlmostEqual(up.length(), 1.0, places=5)
+        for a, b in ((right, up), (right, forward), (up, forward)):
+            from PySide6.QtGui import QVector3D
+
+            self.assertAlmostEqual(QVector3D.dotProduct(a, b), 0.0, places=5)
+
+        # forward really does point from the eye at the shard
+        from PySide6.QtGui import QVector3D
+
+        expected = (QVector3D(0, 0, 0) - eye).normalized()
+        self.assertAlmostEqual(QVector3D.dotProduct(forward, expected), 1.0, places=5)
+
     def test_light_color_reaches_the_shader(self):
         """Render twice under different lights; the pixels must differ.
 

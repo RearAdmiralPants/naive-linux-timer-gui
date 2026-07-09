@@ -53,8 +53,17 @@ _SLIDERS = [
 
 _SKY_SLIDERS = [
     ("nebula", 0.0, 1.5),
-    ("star_density", 4.0, 60.0),
+    ("star_density", 10.0, 200.0),
     ("star_brightness", 0.0, 2.0),
+]
+
+_CAMERA_SLIDERS = [
+    ("orbit_speed", 0.0, 0.8),
+    ("sway_degrees", 0.0, 180.0),   # 180 = a full orbit; the numerals turn away
+    ("orbit_radius", 2.0, 6.0),
+    ("orbit_height", -1.5, 2.0),
+    ("orbit_bob", 0.0, 1.0),
+    ("idle_spin", 0.0, 0.6),
 ]
 
 class _HexColorEdit(QLineEdit):
@@ -100,6 +109,7 @@ class TuningPanel(QWidget):
         self._labels: dict[str, QLabel] = {}
 
         outer.addWidget(self._slider_group("Glass", _SLIDERS))
+        outer.addWidget(self._slider_group("Camera", _CAMERA_SLIDERS))
         outer.addWidget(self._slider_group("Sky", _SKY_SLIDERS))
 
         appearance = QGroupBox("Numerals")
@@ -189,7 +199,7 @@ class TuningPanel(QWidget):
     def _dump(self) -> None:
         p: ShardParams = self._params
         print("\n# --- paste into ShardParams defaults ---")
-        for name, _lo, _hi in _SLIDERS + _SKY_SLIDERS:
+        for name, _lo, _hi in _SLIDERS + _CAMERA_SLIDERS + _SKY_SLIDERS:
             print(f"    {name}: float = {getattr(p, name):.2f}")
         for name in (
             "glass_color", "text_color", "light_color",

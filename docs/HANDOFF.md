@@ -189,8 +189,39 @@ Render and measure; do not reason about it. Each of these caught a real bug:
   and drawn as a fullscreen pass before the shard. No image asset: nothing to
   license, and it resamples at any window size. Three star layers (hash grid,
   rare bright stars via a high power, desynchronised twinkle) plus a
-  domain-warped fBm nebula. Costs 0.64 ms/frame for the *whole* scene at
-  420x620 — about 3.8% of a 60 fps budget.
+  domain-warped fBm nebula.
+- [x] **It is a real skybox, not a wallpaper.** The noise is evaluated in world
+  space along a per-pixel view ray rebuilt from the camera basis, so the sky
+  lives on the celestial sphere: it rotates with the view and never
+  translates, which is how objects at infinity behave. The first version was
+  screen-space (`vUV` only) and would have stayed glued to the glass the
+  moment the camera moved.
+- [x] **The camera sways**, it does not orbit. See below.
+
+Cost: 2.58 ms/frame for the whole scene at 420x620 — 15.4% of a 60 fps budget,
+a 388 fps ceiling. That is **4x** the screen-space version's 0.64 ms, because
+3D value noise needs 8 lattice hashes per octave against 2D's 4, and there are
+two 5-octave fBm calls per pixel. Still cheap, but it is the first change here
+with a real cost. If it ever matters: fewer octaves, or bake the sky into a
+cubemap once and sample it.
+
+### Why the camera sways instead of orbiting
+
+A full 360° orbit leaves the front face edge-on at 90° and mirrored (seen
+through the translucent glass) at 180°, so the readout is illegible for roughly
+half of every cycle. **This is a timer**; the numerals are the point. The camera
+therefore sweeps a bounded arc across the front — `sway_degrees = 30` either
+side — on a sine, which eases at the reversals with no visible corner. Worst
+front-face facing over a whole cycle is 0.84 (≈33° off-axis).
+
+`sway_degrees = 180` restores the full orbit if you want the sculpture rather
+than the clock. `test_camera_never_swings_behind_the_numerals` will fail if you
+make that the default (it reports facing −0.98).
+
+The shard no longer carries a fixed model rotation, and its `idle_spin` now
+defaults to 0: tilting the object while also orbiting the eye fights itself.
+Both passes read the same `ShardWidget.camera()`; if they ever disagreed, the
+backdrop would slide against the geometry.
 - The sky pass must run **before** `paintGL`'s early return for
   `pieces_have_cleared`, or the backdrop disappears for the ~115 s the alert
   outlives the shard. Pinned by a test.
