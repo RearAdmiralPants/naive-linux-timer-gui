@@ -93,17 +93,28 @@ _OUTLINE = [
 # The bevel is what actually reads as "glass": it catches a highlight along
 # the silhouette, which a zero-thickness polygon can never do.
 _PEAK_Z = 0.14
-_THICKNESS = 0.20
+# Depth of the straight middle slab, between the two bevels. Keep this thin:
+# the bevels are what read as glass, and a fat middle makes the shard look
+# like a slab of plastic.
+_THICKNESS = 0.09
 _BEVEL_INSET = 0.90
 _BEVEL_Z = 0.05
 _BACK_BEVEL_Z = 0.03
 _BACK_PEAK_Z = 0.05
 
-# Centre of mass, used to orient every facet normal outward.
+# Centre of mass of the whole shard.
 _CENTER = (0.0, 0.0, -_THICKNESS / 2.0)
 
-# pos(3) normal(3) uv(2) pieceCenter(3) pieceVel(3) pieceAxis(3)
-_FLOATS_PER_VERTEX = 17
+# pos(3) normal(3) uv(2) pieceCenter(3) pieceVel(3) pieceAxis(3) cap(1)
+_FLOATS_PER_VERTEX = 18
+
+# Triangles per wedge: 1 front face + 2 front bevel + 2 wall + 2 back bevel
+# + 1 back face + 8 radial caps (4 per cut plane).
+_TRIS_PER_WEDGE = 16
+
+# Radians per second the shard turns while idle. Constant: it does not react
+# to the model's running state.
+_IDLE_SPIN_RATE = 0.12
 
 # Seconds for the pieces to clear the frame -- measured by rendering the
 # sequence and counting non-background pixels, not guessed. The alert runs for
@@ -158,7 +169,7 @@ def _face_uv(x: float, y: float) -> tuple:
 _NO_TEXT_UV = (0.002, 0.002)
 
 
-def _add_triangle(data: array.array, tri, uvs, body) -> None:
+def _add_triangle(data: array.array, tri, uvs, body, cap: float = 0.0) -> None:
     """Append one flat-shaded triangle, wound counter-clockwise from outside.
 
     Consistent outward winding is not cosmetic: the two-pass transparency in
@@ -166,6 +177,14 @@ def _add_triangle(data: array.array, tri, uvs, body) -> None:
     Get a triangle backwards and its wall renders in the wrong order.
 
     ``body`` is the wedge's (centre, velocity, axis), repeated on every vertex.
+    Outwardness is judged against that centre -- the wedge's own interior point
+    -- and *not* against the shard's centre of mass. The shard's axis lies
+    inside both of a wedge's radial cut planes, so a cap triangle's normal is
+    very nearly perpendicular to the direction from the shard centre, and the
+    sign of that dot product is noise.
+
+    ``cap`` marks the radial cut faces, which are interior surfaces while the
+    shard is whole and are discarded by the fragment shader until it breaks.
     """
     ux, uy, uz = (tri[1][j] - tri[0][j] for j in range(3))
     vx, vy, vz = (tri[2][j] - tri[0][j] for j in range(3))
@@ -173,11 +192,13 @@ def _add_triangle(data: array.array, tri, uvs, body) -> None:
     ny = uz * vx - ux * vz
     nz = ux * vy - uy * vx
 
-    # Does the normal point away from the centre of mass? If not, the triangle
-    # is wound backwards: swap two vertices and flip the normal.
-    cx = sum(v[0] for v in tri) / 3.0 - _CENTER[0]
-    cy = sum(v[1] for v in tri) / 3.0 - _CENTER[1]
-    cz = sum(v[2] for v in tri) / 3.0 - _CENTER[2]
+    centre, velocity, axis = body
+
+    # Does the normal point away from the wedge's interior? If not, the
+    # triangle is wound backwards: swap two vertices and flip the normal.
+    cx = sum(v[0] for v in tri) / 3.0 - centre[0]
+    cy = sum(v[1] for v in tri) / 3.0 - centre[1]
+    cz = sum(v[2] for v in tri) / 3.0 - centre[2]
     if nx * cx + ny * cy + nz * cz < 0.0:
         tri = [tri[0], tri[2], tri[1]]
         uvs = [uvs[0], uvs[2], uvs[1]]
@@ -186,9 +207,10 @@ def _add_triangle(data: array.array, tri, uvs, body) -> None:
     length = math.sqrt(nx * nx + ny * ny + nz * nz) or 1.0
     normal = (nx / length, ny / length, nz / length)
 
-    centre, velocity, axis = body
     for (px, py, pz), (u, v) in zip(tri, uvs):
-        data.extend((px, py, pz, *normal, u, v, *centre, *velocity, *axis))
+        data.extend(
+            (px, py, pz, *normal, u, v, *centre, *velocity, *axis, cap)
+        )
 
 
 def _hash01(i: int, salt: int) -> float:
@@ -273,6 +295,8 @@ def _build_geometry() -> array.array:
         )
 
         # One rigid body for the whole wedge, pivoting on its own centroid.
+        # Built first: its centre is the interior reference _add_triangle uses
+        # to orient every facet of this wedge outward.
         piece = _wedge_rigid_body(
             i,
             [
@@ -313,6 +337,23 @@ def _build_geometry() -> array.array:
         _add_triangle(data, [back_rim_a, back_inset_b, back_rim_b], blank, piece)
         # Back face.
         _add_triangle(data, [back_apex, back_inset_b, back_inset_a], blank, piece)
+
+        # Radial cut faces. Without these a wedge is an open shell, and the
+        # tumbling pieces read as hollow the moment they turn edge-on. Each
+        # cut is a hexagon in the plane through the shard's axis and one rim
+        # point; fan it from the front apex.
+        for profile in (
+            [front_apex, inset_a, rim_a, back_rim_a, back_inset_a, back_apex],
+            [front_apex, inset_b, rim_b, back_rim_b, back_inset_b, back_apex],
+        ):
+            for k in range(1, len(profile) - 1):
+                _add_triangle(
+                    data,
+                    [profile[0], profile[k], profile[k + 1]],
+                    blank,
+                    piece,
+                    cap=1.0,
+                )
 
     return data
 
@@ -363,6 +404,7 @@ class ShardWidget(QOpenGLWidget):
         self._alarm_phase = 0.0
         self._shatter_t = 0.0  # seconds since the break; 0 while intact
         self._spin = 0.0
+        self._spin_at_break = 0.0
         self._text = ""
 
         self._program: QOpenGLShaderProgram | None = None
@@ -394,7 +436,12 @@ class ShardWidget(QOpenGLWidget):
         if active == self._alarm:
             return
         self._alarm = active
-        if not active:
+        if active:
+            # Break from wherever the idle rotation happens to be, not from
+            # the rest pose. Otherwise the shard visibly snaps back to its
+            # start angle on the frame it shatters.
+            self._spin_at_break = self._spin
+        else:
             # Reset reassembles the shard.
             self._shatter_t = 0.0
             self._alarm_phase = 0.0
@@ -406,7 +453,10 @@ class ShardWidget(QOpenGLWidget):
             self._shatter_t += dt
             self._alarm_phase += dt * 1.5 * 2.0 * math.pi
         else:
-            self._spin += dt * (0.55 if self._model.is_running else 0.12)
+            # One idle speed, whether or not the model is running. Speeding up
+            # while the timer ran drew the eye to the rotation instead of the
+            # numerals.
+            self._spin += dt * _IDLE_SPIN_RATE
         self.update()
 
     @property
@@ -443,6 +493,7 @@ class ShardWidget(QOpenGLWidget):
             program.bindAttributeLocation("aPieceCenter", 3)
             program.bindAttributeLocation("aPieceVel", 4)
             program.bindAttributeLocation("aPieceAxis", 5)
+            program.bindAttributeLocation("aCap", 6)
             ok = program.link()
 
         if not ok:
@@ -464,6 +515,7 @@ class ShardWidget(QOpenGLWidget):
                 "uCamPos", "uLightPos", "uGlassColor", "uTextColor",
                 "uSpecPower", "uSpecStrength", "uFresnel", "uGlow",
                 "uEtch", "uBaseAlpha", "uAlarm", "uShatterT", "uSpin",
+                "uSpinAtBreak",
             )
         }
         program.release()
@@ -501,6 +553,7 @@ class ShardWidget(QOpenGLWidget):
             (3, 3, 8 * 4),    # aPieceCenter
             (4, 3, 11 * 4),   # aPieceVel
             (5, 3, 14 * 4),   # aPieceAxis
+            (6, 1, 17 * 4),   # aCap
         ):
             self._program.enableAttributeArray(loc)
             self._program.setAttributeBuffer(loc, _GL_FLOAT, offset, size, stride)
@@ -600,6 +653,7 @@ class ShardWidget(QOpenGLWidget):
         self._set_float("uAlarm", float(alarm))
         self._set_float("uShatterT", float(self._shatter_t))
         self._set_float("uSpin", float(self._spin))
+        self._set_float("uSpinAtBreak", float(self._spin_at_break))
 
         # Two passes, back surfaces first. The shard is translucent, so blend
         # order matters: draw the inside of the solid, then the outside over

@@ -94,8 +94,8 @@ class NoGlTest(unittest.TestCase):
 
         vertices = len(data) // floats_per_vertex
         # Per wedge: front face, 2 front bevel, 2 side wall, 2 back bevel,
-        # back face = 8 triangles.
-        self.assertEqual(vertices, 3 * 8 * len(_OUTLINE))
+        # back face, 8 radial caps = 16 triangles.
+        self.assertEqual(vertices, 3 * 16 * len(_OUTLINE))
 
         for i in range(vertices):
             base = i * floats_per_vertex
@@ -137,22 +137,74 @@ class NoGlTest(unittest.TestCase):
         self.assertGreater(rim_u, 1.0, "the rim must fall off the texture")
 
     def test_every_facet_normal_points_outward(self):
-        """Two-pass transparency culls by winding, so orientation must hold."""
-        from naive_timer.shard import (
-            _CENTER, _FLOATS_PER_VERTEX as stride, _build_geometry,
-        )
+        """Two-pass transparency culls by winding, so orientation must hold.
+
+        Measured against the *wedge's* centroid, not the shard's. The shard's
+        axis lies inside both of a wedge's radial cut planes, so a cap normal
+        is near-perpendicular to the direction from the shard centre and the
+        sign of that dot product is meaningless.
+        """
+        from naive_timer.shard import _FLOATS_PER_VERTEX as stride, _build_geometry
 
         data = _build_geometry()
         for i in range(0, len(data) // stride, 3):
             tri = [data[(i + k) * stride : (i + k) * stride + 3] for k in range(3)]
             nx, ny, nz = data[i * stride + 3 : i * stride + 6]
-            cx = sum(v[0] for v in tri) / 3.0 - _CENTER[0]
-            cy = sum(v[1] for v in tri) / 3.0 - _CENTER[1]
-            cz = sum(v[2] for v in tri) / 3.0 - _CENTER[2]
+            centre = data[i * stride + 8 : i * stride + 11]
+            cx = sum(v[0] for v in tri) / 3.0 - centre[0]
+            cy = sum(v[1] for v in tri) / 3.0 - centre[1]
+            cz = sum(v[2] for v in tri) / 3.0 - centre[2]
             self.assertGreater(
                 nx * cx + ny * cy + nz * cz, 0.0,
                 msg=f"triangle {i // 3} is wound inward",
             )
+
+    def test_each_wedge_is_a_closed_solid(self):
+        """Open shells look hollow the instant a tumbling piece turns edge-on.
+
+        A closed triangle mesh has every edge shared by exactly two facets.
+        Before the radial cut faces existed, a wedge's cut boundary edges
+        appeared only once.
+        """
+        from collections import Counter
+
+        from naive_timer.shard import (
+            _FLOATS_PER_VERTEX as stride, _OUTLINE, _build_geometry,
+        )
+
+        data = _build_geometry()
+        verts_per_wedge = 3 * 16
+
+        def key(v):  # quantise, so shared corners compare equal
+            return tuple(round(c, 5) for c in v)
+
+        for wedge in range(len(_OUTLINE)):
+            edges = Counter()
+            start = wedge * verts_per_wedge
+            for t in range(16):
+                tri = [
+                    key(data[(start + t * 3 + k) * stride : (start + t * 3 + k) * stride + 3])
+                    for k in range(3)
+                ]
+                for a, b in ((0, 1), (1, 2), (2, 0)):
+                    edges[frozenset((tri[a], tri[b]))] += 1
+
+            unshared = [e for e, n in edges.items() if n != 2]
+            self.assertEqual(
+                unshared, [], f"wedge {wedge} is an open shell, not a solid"
+            )
+
+    def test_only_the_cut_faces_are_flagged_as_caps(self):
+        """The cap flag drives the fragment discard while the shard is whole."""
+        from naive_timer.shard import (
+            _FLOATS_PER_VERTEX as stride, _OUTLINE, _build_geometry,
+        )
+
+        data = _build_geometry()
+        caps = [data[v * stride + 17] for v in range(len(data) // stride)]
+        # 8 cap triangles of the 16 per wedge, 3 vertices each.
+        self.assertEqual(sum(caps), 3 * 8 * len(_OUTLINE))
+        self.assertTrue(all(c in (0.0, 1.0) for c in caps))
 
     def test_a_wedge_shares_one_rigid_body(self):
         """Front face, walls and back of one wedge must tumble together."""
@@ -161,7 +213,7 @@ class NoGlTest(unittest.TestCase):
         )
 
         data = _build_geometry()
-        verts_per_wedge = 3 * 8
+        verts_per_wedge = 3 * 16
 
         for wedge in range(len(_OUTLINE)):
             bodies = {
@@ -188,7 +240,7 @@ class NoGlTest(unittest.TestCase):
         )
 
         data = _build_geometry()
-        verts_per_wedge = 3 * 8
+        verts_per_wedge = 3 * 16
 
         centres = []
         for wedge in range(len(_OUTLINE)):
@@ -225,7 +277,7 @@ class NoGlTest(unittest.TestCase):
         )
 
         data = _build_geometry()
-        verts_per_wedge = 3 * 8
+        verts_per_wedge = 3 * 16
         t = _SHATTER_CLEAR_S
         gravity_y = -0.32
 
@@ -257,7 +309,7 @@ class NoGlTest(unittest.TestCase):
         )
 
         data = _build_geometry()
-        verts_per_wedge = 3 * 8
+        verts_per_wedge = 3 * 16
 
         for wedge in range(len(_OUTLINE)):
             base = wedge * verts_per_wedge * stride
@@ -314,6 +366,37 @@ class GlTest(unittest.TestCase):
         window = MainWindow()
         window.show()
         self.assertTrue(window.windowTitle())
+
+    def test_shatter_starts_from_the_current_pose(self):
+        """The shard must not snap back to its rest angle as it breaks."""
+        from naive_timer.shard import ShardWidget
+
+        class Model:
+            is_running = True
+
+        shard = ShardWidget(Model())
+        shard._spin = 1.0
+        shard.set_alarm(True)
+        self.assertEqual(shard._spin_at_break, 1.0)
+
+        shard.set_alarm(False)
+        self.assertEqual(shard._shatter_t, 0.0, "reset reassembles the shard")
+
+    def test_idle_rotation_ignores_whether_the_model_runs(self):
+        """Speeding up on start drew the eye away from the numerals."""
+        from naive_timer.shard import ShardWidget
+
+        class Model:
+            is_running = False
+
+        stopped = ShardWidget(Model())
+        stopped.advance(1.0)
+
+        Model.is_running = True
+        running = ShardWidget(Model())
+        running.advance(1.0)
+
+        self.assertEqual(stopped._spin, running._spin)
 
 
 if __name__ == "__main__":

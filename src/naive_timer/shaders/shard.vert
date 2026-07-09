@@ -16,18 +16,21 @@ layout(location = 2) in vec2 aUV;
 layout(location = 3) in vec3 aPieceCenter;  // pivot: the wedge's centroid
 layout(location = 4) in vec3 aPieceVel;     // linear velocity, units/sec
 layout(location = 5) in vec3 aPieceAxis;    // rotation axis; |axis| = rad/sec
+layout(location = 6) in float aCap;         // 1.0 on the radial cut faces
 
 uniform mat4 uModel;
 uniform mat4 uView;
 uniform mat4 uProj;
 uniform mat3 uNormalMat;
 
-uniform float uShatterT;  // seconds since the break; 0 while intact
-uniform float uSpin;      // radians, slow idle rotation
+uniform float uShatterT;     // seconds since the break; 0 while intact
+uniform float uSpin;         // radians, slow idle rotation
+uniform float uSpinAtBreak;  // uSpin sampled the instant the shard broke
 
 out vec3 vWorld;
 out vec3 vNormal;
 out vec2 vUV;
+out float vCap;
 
 // Gravity, so the pieces fall away rather than drifting flat.
 const vec3 GRAVITY = vec3(0.0, -0.32, 0.0);
@@ -53,31 +56,37 @@ mat3 spinY(float angle) {
 }
 
 void main() {
-    vec3 pos = aPos;
-    vec3 nrm = aNormal;
+    // The shard breaks from wherever its idle rotation had got to. Freezing
+    // the angle at the break, rather than dropping back to zero, is what stops
+    // the shard snapping to its start pose one frame before it shatters.
+    mat3 spin = spinY(uShatterT > 0.0 ? uSpinAtBreak : uSpin);
+
+    vec3 pos = spin * aPos;
+    vec3 nrm = spin * aNormal;
 
     if (uShatterT > 0.0) {
         float t = uShatterT;
-        float rate = length(aPieceAxis);
-        mat3 tumble = rate > 1e-5
-            ? axisRotation(aPieceAxis, rate * t)
-            : mat3(1.0);
+
+        // The rigid-body state was authored in the shard's rest frame, so it
+        // has to be carried into the frozen pose along with the geometry.
+        vec3 centre = spin * aPieceCenter;
+        vec3 vel = spin * aPieceVel;
+        vec3 axis = spin * aPieceAxis;
+
+        float rate = length(axis);
+        mat3 tumble = rate > 1e-5 ? axisRotation(axis, rate * t) : mat3(1.0);
 
         // Rotate about the wedge's own centroid, then carry it away.
-        pos = aPieceCenter + tumble * (aPos - aPieceCenter);
-        pos += aPieceVel * t + 0.5 * GRAVITY * t * t;
-        nrm = tumble * aNormal;
-    } else {
-        // Idle: the whole shard turns slowly on its axis, showing its edge.
-        mat3 spin = spinY(uSpin);
-        pos = spin * pos;
-        nrm = spin * nrm;
+        pos = centre + tumble * (pos - centre);
+        pos += vel * t + 0.5 * GRAVITY * t * t;
+        nrm = tumble * nrm;
     }
 
     vec4 world = uModel * vec4(pos, 1.0);
     vWorld = world.xyz;
     vNormal = normalize(uNormalMat * nrm);
     vUV = aUV;
+    vCap = aCap;
 
     gl_Position = uProj * uView * world;
 }

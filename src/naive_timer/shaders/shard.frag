@@ -10,10 +10,12 @@
 in vec3 vWorld;
 in vec3 vNormal;
 in vec2 vUV;
+in float vCap;             // 1.0 on a wedge's radial cut faces
 
 out vec4 FragColor;
 
 uniform sampler2D uText;   // numerals, coverage in .a (white, premultiplied)
+uniform float uShatterT;   // seconds since the break; 0 while intact
 
 uniform vec3 uLightPos;    // offscreen light, world space
 uniform vec3 uCamPos;
@@ -30,6 +32,14 @@ uniform float uBaseAlpha;
 uniform float uAlarm;         // 0..1, pulses after the countdown hits zero
 
 void main() {
+    // The radial cut faces exist so the tumbling wedges are solid rather than
+    // hollow shells. While the shard is whole they are interior surfaces
+    // between neighbouring wedges: drawing them would double up translucent
+    // layers and muddy the glass.
+    if (vCap > 0.5 && uShatterT <= 0.0) {
+        discard;
+    }
+
     float cov = texture(uText, vUV).a;
 
     vec3 N = normalize(vNormal);
