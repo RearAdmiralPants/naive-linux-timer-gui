@@ -1,0 +1,15 @@
+# --- paste into ShardParams defaults ---
+    light_x: float = -1.78
+    light_y: float = 4.27
+    light_z: float = 0.85
+    spec_power: float = 14.19
+    spec_strength: float = 1.80
+    fresnel: float = 0.74
+    glow: float = 1.28
+    etch: float = 0.33
+    base_alpha: float = 0.55
+    glass_color: tuple = (0.16, 0.34, 0.52)
+    text_color: tuple = (1.0, 0.35, 0.3)
+    font_family: str = "monospace"
+    font_bold: bool = True
+# ---------------------------------------
