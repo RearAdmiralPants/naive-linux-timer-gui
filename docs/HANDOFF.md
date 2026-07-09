@@ -129,10 +129,16 @@ by dependency, not by priority.
   `aPieceAxis`), integrated in the vertex shader against elapsed `uShatterT`.
   Pieces tumble about *their own* centroids and recede under gravity. The old
   pinwheel came from rotating every piece about the shard's centre.
-- [ ] **Etch pixelation at grazing angles.** `shard.frag` scales the glyph
-  coverage gradient (`dFdx`/`dFdy`) by a flat `18.0`. Screen-space derivatives
-  blow up where the face turns away from the camera, so engraving edges alias.
-  Needs clamping, or a gradient computed in texture space.
+- [ ] **Etch speckle on glyph edges.** *Not* a grazing-angle effect — that was
+  a wrong guess, disproved by rendering the same camera angle at `etch = 0`
+  (clean) and `etch = 1` (speckled). `shard.frag` perturbs the surface normal
+  by the screen-space derivative of glyph coverage, scaled by a flat `18.0`.
+  `dFdx`/`dFdy` are evaluated per 2×2 pixel quad, so across a magnified glyph
+  edge the derivative is ~0 inside a quad and jumps at quad boundaries; the
+  `18.0` amplifies that quantisation into stair-steps and stray bright pixels.
+  Fix by computing the gradient in *texture* space — central-difference the
+  coverage at ±1 texel via `textureSize()` — rather than from screen
+  derivatives. Clamping the magnitude is a lesser mitigation.
 
 Notes for whoever touches the shatter next:
 
@@ -146,6 +152,28 @@ Notes for whoever touches the shatter next:
   test that bites is `test_pieces_are_gone_by_the_declared_clear_time`.
 - The break is deterministic (`_hash01`, not `random`) so a bad-looking tumble
   reproduces and can be pinned.
+- Wedges are **closed solids**: each carries the two radial cut faces where it
+  met its neighbours, flagged `aCap` and discarded by the fragment shader while
+  the shard is whole (they are interior surfaces then, and would muddy the
+  glass). Without them the tumbling pieces looked hollow edge-on.
+- Facet winding is judged against the **wedge's** centroid, not the shard's.
+  The shard's axis lies inside both cut planes, so a cap's normal is
+  near-perpendicular to the direction from the shard centre and that dot
+  product's sign is noise.
+- The alarm **tints** the lit surface rather than replacing it. Mixing straight
+  to a flat red erased all shading at each pulse peak, so the wedges became red
+  silhouettes and their per-piece lighting was invisible half the time.
+
+### How to check a shader change actually did something
+
+Render and measure; do not reason about it. Each of these caught a real bug:
+
+- *Is it lit?* Move the light, count changed pixels. (0 changed at the alarm
+  peak proved the shading was being discarded.)
+- *Did the pose survive?* Compare silhouette masks across the frame boundary.
+  (0.01% mismatch when the spin is preserved; 31% when it snaps to rest.)
+- *Is it drawing at all?* Force `FragColor` to a solid colour, then sample
+  pixel values. (One distinct colour on screen meant alpha was 0.)
 
 **Colour controls**
 
