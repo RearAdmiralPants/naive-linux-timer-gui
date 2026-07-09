@@ -73,8 +73,17 @@ void main() {
     alpha = clamp(alpha + cov * uEtch * 0.25, 0.0, 1.0);
 
     // Alarm: fade toward a mostly-transparent dark red and back.
+    //
+    // Tint the *lit* surface rather than replacing it. Mixing straight to a
+    // flat colour erased all shading at the pulse peak, so the tumbling
+    // wedges became red silhouettes and the lighting on them -- which is
+    // computed per-piece from their tumbled normals -- was invisible for half
+    // of every pulse.
     const vec3 ALARM_COLOR = vec3(0.38, 0.02, 0.03);
-    col = mix(col, ALARM_COLOR, uAlarm);
+    vec3 alarmLit = ALARM_COLOR * (0.55 + 1.7 * diff)
+                  + vec3(spec) * 0.55
+                  + fres * ALARM_COLOR * 1.5;
+    col = mix(col, alarmLit, uAlarm);
     alpha = mix(alpha, alpha * 0.40 + 0.08, uAlarm);
 
     // Roll the highlights off instead of clipping them. A specular that
