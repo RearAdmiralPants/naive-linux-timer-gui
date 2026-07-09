@@ -52,11 +52,18 @@ _GL_SRC_ALPHA = 0x0302
 _GL_ONE_MINUS_SRC_ALPHA = 0x0303
 _GL_COLOR_BUFFER_BIT = 0x4000
 _GL_DEPTH_BUFFER_BIT = 0x0100
+_GL_CULL_FACE = 0x0B44
+_GL_FRONT = 0x0404
+_GL_BACK = 0x0405
 
 # Texture the numerals are drawn into. Wide, because the readout is wide, and
 # oversized because the glyphs get magnified across the face of the shard.
 _TEX_W, _TEX_H = 1536, 512
 _TEX_PT = 192
+
+# Fraction of the texture width the numerals are allowed to occupy. The rest
+# is transparent margin, which is what the bevel and side walls sample.
+_TEXT_FIT = 0.92
 
 # Irregular outline, traced counter-clockwise. Deliberately not symmetric --
 # a regular polygon reads as a gem, not as a shard.
@@ -69,9 +76,31 @@ _OUTLINE = [
     (-0.82, -0.54),
 ]
 
-# How far the centre of the shard lifts off the rim. Drives the facet angles,
-# and therefore how sharply the highlight breaks between them.
-_PEAK_Z = 0.16
+# The shard is a solid, not a flat fan. Cross-section through one edge:
+#
+#            apex                     <- _PEAK_Z, front face peak
+#           /    \
+#      inset      inset               <- _BEVEL_Z, at _BEVEL_INSET scale
+#     /                \
+#   rim                rim            <- z = 0, the silhouette edge
+#    |                  |             <- side wall, _THICKNESS deep
+#   rim                rim            <- z = -_THICKNESS
+#     \                /
+#      inset      inset               <- back bevel, shallower than the front
+#           \    /
+#          back apex
+#
+# The bevel is what actually reads as "glass": it catches a highlight along
+# the silhouette, which a zero-thickness polygon can never do.
+_PEAK_Z = 0.14
+_THICKNESS = 0.20
+_BEVEL_INSET = 0.90
+_BEVEL_Z = 0.05
+_BACK_BEVEL_Z = 0.03
+_BACK_PEAK_Z = 0.05
+
+# Centre of mass, used to orient every facet normal outward.
+_CENTER = (0.0, 0.0, -_THICKNESS / 2.0)
 
 
 @dataclass
@@ -103,39 +132,124 @@ def default_surface_format() -> QSurfaceFormat:
     return fmt
 
 
+# Shrinks the text projection so the numerals stay inside the bevel's inset
+# ring instead of spilling onto the chamfer. >1 makes the text smaller; the rim
+# then projects outside [0,1] and clamps to the texture's transparent border.
+_FACE_UV_SCALE = 1.22
+
+
+def _face_uv(x: float, y: float) -> tuple:
+    """Planar-project a front-face point into the text texture."""
+    u = x * 0.5 * _FACE_UV_SCALE + 0.5
+    v = 1.0 - (y * 0.5 * _FACE_UV_SCALE + 0.5)
+    return (u, v)
+
+
+# Corner of the text image, which is always transparent. Side walls and the
+# back face sample here so no numerals bleed onto them.
+_NO_TEXT_UV = (0.002, 0.002)
+
+
+def _add_triangle(data: array.array, tri, uvs, piece) -> None:
+    """Append one flat-shaded triangle, wound counter-clockwise from outside.
+
+    Consistent outward winding is not cosmetic: the two-pass transparency in
+    paintGL culls by face orientation to draw back surfaces before front ones.
+    Get a triangle backwards and its wall renders in the wrong order.
+    """
+    ux, uy, uz = (tri[1][j] - tri[0][j] for j in range(3))
+    vx, vy, vz = (tri[2][j] - tri[0][j] for j in range(3))
+    nx = uy * vz - uz * vy
+    ny = uz * vx - ux * vz
+    nz = ux * vy - uy * vx
+
+    # Does the normal point away from the centre of mass? If not, the triangle
+    # is wound backwards: swap two vertices and flip the normal.
+    cx = sum(v[0] for v in tri) / 3.0 - _CENTER[0]
+    cy = sum(v[1] for v in tri) / 3.0 - _CENTER[1]
+    cz = sum(v[2] for v in tri) / 3.0 - _CENTER[2]
+    if nx * cx + ny * cy + nz * cz < 0.0:
+        tri = [tri[0], tri[2], tri[1]]
+        uvs = [uvs[0], uvs[2], uvs[1]]
+        nx, ny, nz = -nx, -ny, -nz
+
+    length = math.sqrt(nx * nx + ny * ny + nz * nz) or 1.0
+    normal = (nx / length, ny / length, nz / length)
+
+    for (px, py, pz), (u, v) in zip(tri, uvs):
+        data.extend((px, py, pz, *normal, u, v, *piece))
+
+
 def _build_geometry() -> array.array:
-    """Fan the outline into flat-shaded facets around a raised centre.
+    """Extrude the outline into a solid, one wedge per edge.
+
+    Each wedge contributes a front face, a front bevel, a side wall, a back
+    bevel and a back face -- and all of them share one ``pieceDir``. That makes
+    a wedge a natural rigid body for the shatter: the whole solid chunk flies
+    apart together, rather than the front skin peeling off its own side wall.
 
     Interleaved per vertex: pos(3) normal(3) uv(2) pieceDir(3) = 11 floats.
     """
     data = array.array("f")
-    apex = (0.0, 0.0, _PEAK_Z)
+    front_apex = (0.0, 0.0, _PEAK_Z)
+    back_apex = (0.0, 0.0, -_THICKNESS - _BACK_PEAK_Z)
     n = len(_OUTLINE)
 
     for i in range(n):
         ax, ay = _OUTLINE[i]
         bx, by = _OUTLINE[(i + 1) % n]
-        tri = [apex, (ax, ay, 0.0), (bx, by, 0.0)]
 
-        # Flat normal from the facet's own winding.
-        ux, uy, uz = (tri[1][j] - tri[0][j] for j in range(3))
-        vx, vy, vz = (tri[2][j] - tri[0][j] for j in range(3))
-        nx = uy * vz - uz * vy
-        ny = uz * vx - ux * vz
-        nz = ux * vy - uy * vx
-        length = math.sqrt(nx * nx + ny * ny + nz * nz) or 1.0
-        normal = (nx / length, ny / length, nz / length)
+        rim_a = (ax, ay, 0.0)
+        rim_b = (bx, by, 0.0)
+        inset_a = (ax * _BEVEL_INSET, ay * _BEVEL_INSET, _BEVEL_Z)
+        inset_b = (bx * _BEVEL_INSET, by * _BEVEL_INSET, _BEVEL_Z)
 
-        # Outward direction for the fracture: away from the shard's centre.
-        cx = (tri[0][0] + tri[1][0] + tri[2][0]) / 3.0
-        cy = (tri[0][1] + tri[1][1] + tri[2][1]) / 3.0
+        back_rim_a = (ax, ay, -_THICKNESS)
+        back_rim_b = (bx, by, -_THICKNESS)
+        back_inset_a = (
+            ax * _BEVEL_INSET, ay * _BEVEL_INSET, -_THICKNESS - _BACK_BEVEL_Z
+        )
+        back_inset_b = (
+            bx * _BEVEL_INSET, by * _BEVEL_INSET, -_THICKNESS - _BACK_BEVEL_Z
+        )
+
+        # One direction for the whole wedge: outward from the axis, and a
+        # little forward so pieces separate in depth as well as in plane.
+        cx, cy = (ax + bx) / 3.0, (ay + by) / 3.0
         clen = math.hypot(cx, cy) or 1.0
         piece = (cx / clen, cy / clen, 0.25)
 
-        for px, py, pz in tri:
-            u = px * 0.5 + 0.5
-            v = 1.0 - (py * 0.5 + 0.5)
-            data.extend((px, py, pz, *normal, u, v, *piece))
+        uv_apex = _face_uv(0.0, 0.0)
+        uv_inset_a = _face_uv(inset_a[0], inset_a[1])
+        uv_inset_b = _face_uv(inset_b[0], inset_b[1])
+        uv_rim_a = _face_uv(ax, ay)
+        uv_rim_b = _face_uv(bx, by)
+        blank = [_NO_TEXT_UV] * 3
+
+        # Front face: carries the numerals.
+        _add_triangle(
+            data, [front_apex, inset_a, inset_b],
+            [uv_apex, uv_inset_a, uv_inset_b], piece,
+        )
+        # Front bevel: the chamfer that catches the edge highlight.
+        _add_triangle(
+            data, [inset_a, rim_a, rim_b],
+            [uv_inset_a, uv_rim_a, uv_rim_b], piece,
+        )
+        _add_triangle(
+            data, [inset_a, rim_b, inset_b],
+            [uv_inset_a, uv_rim_b, uv_inset_b], piece,
+        )
+        # Side wall: the thickness you can actually see.
+        _add_triangle(data, [rim_a, back_rim_a, back_rim_b], blank, piece)
+        _add_triangle(data, [rim_a, back_rim_b, rim_b], blank, piece)
+        # Back bevel, shallower than the front.
+        _add_triangle(
+            data, [back_rim_a, back_inset_a, back_inset_b], blank, piece
+        )
+        _add_triangle(data, [back_rim_a, back_inset_b, back_rim_b], blank, piece)
+        # Back face.
+        _add_triangle(data, [back_apex, back_inset_b, back_inset_a], blank, piece)
 
     return data
 
@@ -163,8 +277,8 @@ def render_text_image(text: str, params: ShardParams) -> QImage:
     # Shrink to fit rather than clip: the readout widens by a character once
     # the hour rolls over.
     width = painter.fontMetrics().horizontalAdvance(text)
-    if width > _TEX_W * 0.92:
-        font.setPixelSize(int(_TEX_PT * (_TEX_W * 0.92) / width))
+    if width > _TEX_W * _TEXT_FIT:
+        font.setPixelSize(int(_TEX_PT * (_TEX_W * _TEXT_FIT) / width))
         painter.setFont(font)
 
     # White; the shader tints by uTextColor so colour stays a live uniform.
@@ -408,8 +522,17 @@ class ShardWidget(QOpenGLWidget):
         self._set_float("uFracture", float(self._fracture))
         self._set_float("uSpin", float(self._spin))
 
+        # Two passes, back surfaces first. The shard is translucent, so blend
+        # order matters: draw the inside of the solid, then the outside over
+        # it. Culling by winding gives that ordering for free, with no
+        # per-triangle depth sort. Depth *writes* stay on so the numerals on
+        # the front face still occlude the far wall behind them.
         self._vao.bind()
-        fns.glDrawArrays(_GL_TRIANGLES, 0, self._vertex_count)
+        fns.glEnable(_GL_CULL_FACE)
+        for cull in (_GL_FRONT, _GL_BACK):
+            fns.glCullFace(cull)
+            fns.glDrawArrays(_GL_TRIANGLES, 0, self._vertex_count)
+        fns.glDisable(_GL_CULL_FACE)
         self._vao.release()
         self._texture.release(0)
         program.release()

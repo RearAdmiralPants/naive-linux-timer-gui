@@ -82,7 +82,7 @@ class NoGlTest(unittest.TestCase):
             player._effect.loopCount(), QSoundEffect.Loop.Infinite.value
         )
 
-    def test_geometry_is_whole_flat_shaded_facets(self):
+    def test_geometry_is_a_solid_of_flat_shaded_facets(self):
         from naive_timer.shard import _OUTLINE, _build_geometry
 
         data = _build_geometry()
@@ -90,7 +90,9 @@ class NoGlTest(unittest.TestCase):
         self.assertEqual(len(data) % floats_per_vertex, 0)
 
         vertices = len(data) // floats_per_vertex
-        self.assertEqual(vertices, 3 * len(_OUTLINE), "one triangle per edge")
+        # Per wedge: front face, 2 front bevel, 2 side wall, 2 back bevel,
+        # back face = 8 triangles.
+        self.assertEqual(vertices, 3 * 8 * len(_OUTLINE))
 
         for i in range(vertices):
             base = i * floats_per_vertex
@@ -99,8 +101,72 @@ class NoGlTest(unittest.TestCase):
                 math.sqrt(nx * nx + ny * ny + nz * nz), 1.0, places=5,
                 msg="facet normals must be unit length",
             )
+            # The rim projects outside [0,1] on purpose, so the numerals stay
+            # inside the bevel; ClampToEdge samples the transparent border.
             u, v = data[base + 6 : base + 8]
-            self.assertTrue(0.0 <= u <= 1.0 and 0.0 <= v <= 1.0)
+            self.assertTrue(-0.5 <= u <= 1.5 and -0.5 <= v <= 1.5)
+
+    def test_numerals_stay_inside_the_bevel(self):
+        """Ink must land on the front face, never spill onto the chamfer.
+
+        The invariant is about the *ink*, not the ring: the numerals occupy
+        only the central _TEXT_FIT of the texture, so the inset ring may
+        legitimately project past u=1.0 into the transparent margin.
+        """
+        from naive_timer.shard import (
+            _BEVEL_INSET, _OUTLINE, _TEXT_FIT, _face_uv,
+        )
+
+        # Rightmost edge of the ink, in texture coordinates.
+        ink_edge_u = 0.5 + _TEXT_FIT / 2.0
+
+        # Where the inset ring (the front face boundary) lands, at its widest.
+        widest_x = max(abs(x) for x, _ in _OUTLINE)
+        ring_u, _ = _face_uv(_BEVEL_INSET * widest_x, 0.0)
+
+        self.assertGreater(
+            ring_u, ink_edge_u,
+            "the front face must extend past the ink, or numerals hit the bevel",
+        )
+
+        # And the silhouette rim samples the transparent border, not the text.
+        rim_u, _ = _face_uv(widest_x, 0.0)
+        self.assertGreater(rim_u, 1.0, "the rim must fall off the texture")
+
+    def test_every_facet_normal_points_outward(self):
+        """Two-pass transparency culls by winding, so orientation must hold."""
+        from naive_timer.shard import _CENTER, _build_geometry
+
+        data = _build_geometry()
+        stride = 11
+        for i in range(0, len(data) // stride, 3):
+            tri = [data[(i + k) * stride : (i + k) * stride + 3] for k in range(3)]
+            nx, ny, nz = data[i * stride + 3 : i * stride + 6]
+            cx = sum(v[0] for v in tri) / 3.0 - _CENTER[0]
+            cy = sum(v[1] for v in tri) / 3.0 - _CENTER[1]
+            cz = sum(v[2] for v in tri) / 3.0 - _CENTER[2]
+            self.assertGreater(
+                nx * cx + ny * cy + nz * cz, 0.0,
+                msg=f"triangle {i // 3} is wound inward",
+            )
+
+    def test_a_wedge_shares_one_piece_direction(self):
+        """Front face, walls and back of one wedge must fly apart together."""
+        from naive_timer.shard import _OUTLINE, _build_geometry
+
+        data = _build_geometry()
+        stride = 11
+        tris_per_wedge = 8
+        verts_per_wedge = 3 * tris_per_wedge
+
+        for wedge in range(len(_OUTLINE)):
+            dirs = {
+                tuple(data[v * stride + 8 : v * stride + 11])
+                for v in range(
+                    wedge * verts_per_wedge, (wedge + 1) * verts_per_wedge
+                )
+            }
+            self.assertEqual(len(dirs), 1, f"wedge {wedge} has split pieceDir")
 
     def test_text_image_has_ink_where_the_numerals_are(self):
         from naive_timer.shard import ShardParams, render_text_image

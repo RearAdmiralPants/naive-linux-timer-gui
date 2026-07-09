@@ -67,5 +67,10 @@ void main() {
     col = mix(col, ALARM_COLOR, uAlarm);
     alpha = mix(alpha, alpha * 0.40 + 0.08, uAlarm);
 
-    FragColor = vec4(col, alpha);
+    // Roll the highlights off instead of clipping them. A specular that
+    // saturates to flat white on the bevel reads as plastic; this keeps the
+    // hot edge bright but lets it retain colour.
+    col = col / (1.0 + col * 0.55);
+
+    FragColor = vec4(col, clamp(alpha, 0.0, 1.0));
 }
