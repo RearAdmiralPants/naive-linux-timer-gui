@@ -120,19 +120,32 @@ by dependency, not by priority.
 
 **Glass and geometry** — branch `feat/glass-volume` (in progress)
 
-- [ ] **Thickness.** The mesh is a flat triangle fan with no side walls, so it
-  cannot look thick. Extrude the outline: front face, back face, beveled sides
-  with their own normals. Reference (local, untracked): `two-shards.jpg` shows
-  the target — a visible bevel catching light along the edge.
-- [ ] **Shatter as rigid bodies.** Every triangle currently shares the centre
-  vertex, so cracks radiate from the middle and read as a *pinwheel*, not
-  broken glass. Pieces need independent position, velocity, and angular
-  velocity, so they rotate and translate offscreen while the chime and the red
-  fade continue. Depends on thickness — flat pieces cannot tumble convincingly.
+- [x] **Thickness.** Extruded into a solid: front face, front bevel, side wall,
+  back bevel, back face — 8 triangles per wedge. The bevel is what reads as
+  glass; it rakes a highlight along the silhouette, which a flat polygon can
+  never do. Highlights roll off (Reinhard) rather than clipping to white.
+- [x] **Shatter as rigid bodies.** Each wedge now carries its own pivot,
+  linear velocity and angular velocity (`aPieceCenter` / `aPieceVel` /
+  `aPieceAxis`), integrated in the vertex shader against elapsed `uShatterT`.
+  Pieces tumble about *their own* centroids and recede under gravity. The old
+  pinwheel came from rotating every piece about the shard's centre.
 - [ ] **Etch pixelation at grazing angles.** `shard.frag` scales the glyph
   coverage gradient (`dFdx`/`dFdy`) by a flat `18.0`. Screen-space derivatives
   blow up where the face turns away from the camera, so engraving edges alias.
   Needs clamping, or a gradient computed in texture space.
+
+Notes for whoever touches the shatter next:
+
+- Velocities have **negative z**: pieces recede and shrink. Positive z threw
+  them at the camera, where they ballooned and filled the frame.
+- `_SHATTER_CLEAR_S = 5.5` was **measured** by rendering the sequence and
+  counting non-background pixels, not guessed. Past it, `paintGL` returns
+  early — the alert runs 120 s and there is nothing left to rasterise.
+- Gravity dominates the trajectory (≈4.8 units of fall by 5.5 s), so halving
+  the linear speeds does *not* strand a piece on screen. If you retune, the
+  test that bites is `test_pieces_are_gone_by_the_declared_clear_time`.
+- The break is deterministic (`_hash01`, not `random`) so a bad-looking tumble
+  reproduces and can be pinned.
 
 **Colour controls**
 

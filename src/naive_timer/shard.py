@@ -102,6 +102,14 @@ _BACK_PEAK_Z = 0.05
 # Centre of mass, used to orient every facet normal outward.
 _CENTER = (0.0, 0.0, -_THICKNESS / 2.0)
 
+# pos(3) normal(3) uv(2) pieceCenter(3) pieceVel(3) pieceAxis(3)
+_FLOATS_PER_VERTEX = 17
+
+# Seconds for the pieces to clear the frame -- measured by rendering the
+# sequence and counting non-background pixels, not guessed. The alert runs for
+# 120 s, so the shard is gone for most of it; after this we stop drawing.
+_SHATTER_CLEAR_S = 5.5
+
 
 @dataclass
 class ShardParams:
@@ -150,12 +158,14 @@ def _face_uv(x: float, y: float) -> tuple:
 _NO_TEXT_UV = (0.002, 0.002)
 
 
-def _add_triangle(data: array.array, tri, uvs, piece) -> None:
+def _add_triangle(data: array.array, tri, uvs, body) -> None:
     """Append one flat-shaded triangle, wound counter-clockwise from outside.
 
     Consistent outward winding is not cosmetic: the two-pass transparency in
     paintGL culls by face orientation to draw back surfaces before front ones.
     Get a triangle backwards and its wall renders in the wrong order.
+
+    ``body`` is the wedge's (centre, velocity, axis), repeated on every vertex.
     """
     ux, uy, uz = (tri[1][j] - tri[0][j] for j in range(3))
     vx, vy, vz = (tri[2][j] - tri[0][j] for j in range(3))
@@ -176,19 +186,68 @@ def _add_triangle(data: array.array, tri, uvs, piece) -> None:
     length = math.sqrt(nx * nx + ny * ny + nz * nz) or 1.0
     normal = (nx / length, ny / length, nz / length)
 
+    centre, velocity, axis = body
     for (px, py, pz), (u, v) in zip(tri, uvs):
-        data.extend((px, py, pz, *normal, u, v, *piece))
+        data.extend((px, py, pz, *normal, u, v, *centre, *velocity, *axis))
+
+
+def _hash01(i: int, salt: int) -> float:
+    """Deterministic pseudo-random in [0, 1).
+
+    Deliberately not ``random``: the break must look the same on every run, so
+    a bad-looking tumble is reproducible and a test can pin the values.
+    """
+    x = math.sin(i * 12.9898 + salt * 78.233) * 43758.5453
+    return x - math.floor(x)
+
+
+def _wedge_rigid_body(i: int, corners) -> tuple:
+    """Pivot, linear velocity and angular velocity for one wedge.
+
+    The pivot is the wedge's own centroid -- that is the whole point. Rotating
+    every piece about the *shard's* centre is what produced the pinwheel.
+    """
+    n = float(len(corners))
+    centre = (
+        sum(c[0] for c in corners) / n,
+        sum(c[1] for c in corners) / n,
+        sum(c[2] for c in corners) / n,
+    )
+
+    # Drift outward from the axis, with a little scatter so the break is not a
+    # symmetric bloom. Negative z: the pieces recede and shrink, as falling
+    # glass does. Positive z threw them at the camera, where they ballooned.
+    radial = math.hypot(centre[0], centre[1]) or 1.0
+    speed = 0.26 + 0.16 * _hash01(i, 1)
+    velocity = (
+        centre[0] / radial * speed + (_hash01(i, 2) - 0.5) * 0.12,
+        centre[1] / radial * speed + (_hash01(i, 3) - 0.5) * 0.12 + 0.14,
+        -(0.10 + 0.20 * _hash01(i, 4)),
+    )
+
+    # Angular velocity: direction is the axis, magnitude is rad/sec. Keep this
+    # slow -- a wedge's far corner is ~1 unit from its pivot, so even 2 rad/s
+    # sweeps it across the frame.
+    ax = _hash01(i, 5) - 0.5
+    ay = _hash01(i, 6) - 0.5
+    az = _hash01(i, 7) - 0.5
+    alen = math.sqrt(ax * ax + ay * ay + az * az) or 1.0
+    rate = 0.7 + 1.2 * _hash01(i, 8)
+    axis = (ax / alen * rate, ay / alen * rate, az / alen * rate)
+
+    return centre, velocity, axis
 
 
 def _build_geometry() -> array.array:
     """Extrude the outline into a solid, one wedge per edge.
 
     Each wedge contributes a front face, a front bevel, a side wall, a back
-    bevel and a back face -- and all of them share one ``pieceDir``. That makes
-    a wedge a natural rigid body for the shatter: the whole solid chunk flies
-    apart together, rather than the front skin peeling off its own side wall.
+    bevel and a back face -- and all of them share one rigid-body state. That
+    makes a wedge a real chunk: the whole solid piece tumbles together, rather
+    than the front skin peeling off its own side wall.
 
-    Interleaved per vertex: pos(3) normal(3) uv(2) pieceDir(3) = 11 floats.
+    Interleaved per vertex:
+        pos(3) normal(3) uv(2) pieceCenter(3) pieceVel(3) pieceAxis(3) = 17
     """
     data = array.array("f")
     front_apex = (0.0, 0.0, _PEAK_Z)
@@ -213,11 +272,15 @@ def _build_geometry() -> array.array:
             bx * _BEVEL_INSET, by * _BEVEL_INSET, -_THICKNESS - _BACK_BEVEL_Z
         )
 
-        # One direction for the whole wedge: outward from the axis, and a
-        # little forward so pieces separate in depth as well as in plane.
-        cx, cy = (ax + bx) / 3.0, (ay + by) / 3.0
-        clen = math.hypot(cx, cy) or 1.0
-        piece = (cx / clen, cy / clen, 0.25)
+        # One rigid body for the whole wedge, pivoting on its own centroid.
+        piece = _wedge_rigid_body(
+            i,
+            [
+                rim_a, rim_b, inset_a, inset_b,
+                back_rim_a, back_rim_b, back_inset_a, back_inset_b,
+                front_apex, back_apex,
+            ],
+        )
 
         uv_apex = _face_uv(0.0, 0.0)
         uv_inset_a = _face_uv(inset_a[0], inset_a[1])
@@ -298,7 +361,7 @@ class ShardWidget(QOpenGLWidget):
 
         self._alarm = False
         self._alarm_phase = 0.0
-        self._fracture = 0.0
+        self._shatter_t = 0.0  # seconds since the break; 0 while intact
         self._spin = 0.0
         self._text = ""
 
@@ -311,7 +374,7 @@ class ShardWidget(QOpenGLWidget):
         self._vao = QOpenGLVertexArrayObject()
         self._vbo = QOpenGLBuffer(QOpenGLBuffer.VertexBuffer)
         self._vertex_data = _build_geometry()
-        self._vertex_count = len(self._vertex_data) // 11
+        self._vertex_count = len(self._vertex_data) // _FLOATS_PER_VERTEX
 
         self.setMinimumSize(280, 280)
 
@@ -332,17 +395,24 @@ class ShardWidget(QOpenGLWidget):
             return
         self._alarm = active
         if not active:
-            self._fracture = 0.0
+            # Reset reassembles the shard.
+            self._shatter_t = 0.0
             self._alarm_phase = 0.0
 
     def advance(self, dt: float) -> None:
         if self._alarm:
-            # Break apart quickly, then breathe dark red at ~1.5 Hz.
-            self._fracture = min(1.0, self._fracture + dt * 1.6)
+            # The pieces tumble away and keep going; the red pulse continues
+            # long after they have left the frame, until the user resets.
+            self._shatter_t += dt
             self._alarm_phase += dt * 1.5 * 2.0 * math.pi
         else:
             self._spin += dt * (0.55 if self._model.is_running else 0.12)
         self.update()
+
+    @property
+    def pieces_have_cleared(self) -> bool:
+        """True once the tumbling wedges are off screen."""
+        return self._shatter_t > _SHATTER_CLEAR_S
 
     def refresh_params(self) -> None:
         """Call after mutating ``params`` from the tuning panel."""
@@ -370,7 +440,9 @@ class ShardWidget(QOpenGLWidget):
             program.bindAttributeLocation("aPos", 0)
             program.bindAttributeLocation("aNormal", 1)
             program.bindAttributeLocation("aUV", 2)
-            program.bindAttributeLocation("aPieceDir", 3)
+            program.bindAttributeLocation("aPieceCenter", 3)
+            program.bindAttributeLocation("aPieceVel", 4)
+            program.bindAttributeLocation("aPieceAxis", 5)
             ok = program.link()
 
         if not ok:
@@ -391,7 +463,7 @@ class ShardWidget(QOpenGLWidget):
                 "uText", "uModel", "uView", "uProj", "uNormalMat",
                 "uCamPos", "uLightPos", "uGlassColor", "uTextColor",
                 "uSpecPower", "uSpecStrength", "uFresnel", "uGlow",
-                "uEtch", "uBaseAlpha", "uAlarm", "uFracture", "uSpin",
+                "uEtch", "uBaseAlpha", "uAlarm", "uShatterT", "uSpin",
             )
         }
         program.release()
@@ -421,12 +493,14 @@ class ShardWidget(QOpenGLWidget):
         assert self._program is not None
         self._vao.bind()
         self._vbo.bind()
-        stride = 11 * 4
+        stride = _FLOATS_PER_VERTEX * 4
         for loc, size, offset in (
-            (0, 3, 0),
-            (1, 3, 3 * 4),
-            (2, 2, 6 * 4),
-            (3, 3, 8 * 4),
+            (0, 3, 0),        # aPos
+            (1, 3, 3 * 4),    # aNormal
+            (2, 2, 6 * 4),    # aUV
+            (3, 3, 8 * 4),    # aPieceCenter
+            (4, 3, 11 * 4),   # aPieceVel
+            (5, 3, 14 * 4),   # aPieceAxis
         ):
             self._program.enableAttributeArray(loc)
             self._program.setAttributeBuffer(loc, _GL_FLOAT, offset, size, stride)
@@ -483,6 +557,11 @@ class ShardWidget(QOpenGLWidget):
         if program is None or self._texture is None:
             return
 
+        # The wedges have tumbled out of frame. The alert still has ~115 s to
+        # run; there is nothing left to rasterise.
+        if self.pieces_have_cleared:
+            return
+
         p = self.params
         aspect = max(self.width(), 1) / max(self.height(), 1)
 
@@ -519,7 +598,7 @@ class ShardWidget(QOpenGLWidget):
         self._set_float("uEtch", float(p.etch))
         self._set_float("uBaseAlpha", float(p.base_alpha))
         self._set_float("uAlarm", float(alarm))
-        self._set_float("uFracture", float(self._fracture))
+        self._set_float("uShatterT", float(self._shatter_t))
         self._set_float("uSpin", float(self._spin))
 
         # Two passes, back surfaces first. The shard is translucent, so blend

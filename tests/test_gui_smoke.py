@@ -83,10 +83,13 @@ class NoGlTest(unittest.TestCase):
         )
 
     def test_geometry_is_a_solid_of_flat_shaded_facets(self):
-        from naive_timer.shard import _OUTLINE, _build_geometry
+        from naive_timer.shard import (
+            _FLOATS_PER_VERTEX as floats_per_vertex,
+            _OUTLINE,
+            _build_geometry,
+        )
 
         data = _build_geometry()
-        floats_per_vertex = 11
         self.assertEqual(len(data) % floats_per_vertex, 0)
 
         vertices = len(data) // floats_per_vertex
@@ -135,10 +138,11 @@ class NoGlTest(unittest.TestCase):
 
     def test_every_facet_normal_points_outward(self):
         """Two-pass transparency culls by winding, so orientation must hold."""
-        from naive_timer.shard import _CENTER, _build_geometry
+        from naive_timer.shard import (
+            _CENTER, _FLOATS_PER_VERTEX as stride, _build_geometry,
+        )
 
         data = _build_geometry()
-        stride = 11
         for i in range(0, len(data) // stride, 3):
             tri = [data[(i + k) * stride : (i + k) * stride + 3] for k in range(3)]
             nx, ny, nz = data[i * stride + 3 : i * stride + 6]
@@ -150,23 +154,124 @@ class NoGlTest(unittest.TestCase):
                 msg=f"triangle {i // 3} is wound inward",
             )
 
-    def test_a_wedge_shares_one_piece_direction(self):
-        """Front face, walls and back of one wedge must fly apart together."""
-        from naive_timer.shard import _OUTLINE, _build_geometry
+    def test_a_wedge_shares_one_rigid_body(self):
+        """Front face, walls and back of one wedge must tumble together."""
+        from naive_timer.shard import (
+            _FLOATS_PER_VERTEX as stride, _OUTLINE, _build_geometry,
+        )
 
         data = _build_geometry()
-        stride = 11
-        tris_per_wedge = 8
-        verts_per_wedge = 3 * tris_per_wedge
+        verts_per_wedge = 3 * 8
 
         for wedge in range(len(_OUTLINE)):
-            dirs = {
-                tuple(data[v * stride + 8 : v * stride + 11])
+            bodies = {
+                tuple(data[v * stride + 8 : v * stride + 17])
                 for v in range(
                     wedge * verts_per_wedge, (wedge + 1) * verts_per_wedge
                 )
             }
-            self.assertEqual(len(dirs), 1, f"wedge {wedge} has split pieceDir")
+            self.assertEqual(
+                len(bodies), 1, f"wedge {wedge} has a split rigid body"
+            )
+
+    def test_each_wedge_pivots_on_its_own_centroid(self):
+        """The pinwheel bug: pieces rotating about the shard's centre.
+
+        Each wedge's pivot must sit inside that wedge, offset from the axis --
+        not at the origin, which is what made every crack radiate from the
+        middle.
+        """
+        import math
+
+        from naive_timer.shard import (
+            _FLOATS_PER_VERTEX as stride, _OUTLINE, _build_geometry,
+        )
+
+        data = _build_geometry()
+        verts_per_wedge = 3 * 8
+
+        centres = []
+        for wedge in range(len(_OUTLINE)):
+            base = wedge * verts_per_wedge * stride
+            centres.append(tuple(data[base + 8 : base + 11]))
+
+        for wedge, (cx, cy, _cz) in enumerate(centres):
+            self.assertGreater(
+                math.hypot(cx, cy), 0.15,
+                f"wedge {wedge} pivots on the shard's axis, not its own",
+            )
+
+        # And no two wedges share a pivot.
+        self.assertEqual(len(set(centres)), len(_OUTLINE))
+
+    def test_rigid_bodies_are_deterministic(self):
+        """The break must look identical on every run, so bugs reproduce."""
+        from naive_timer.shard import _build_geometry
+
+        self.assertEqual(_build_geometry(), _build_geometry())
+
+    def test_pieces_are_gone_by_the_declared_clear_time(self):
+        """_SHATTER_CLEAR_S stops the draw calls; a piece must not outlive it.
+
+        Integrates the same trajectory the vertex shader uses. If someone
+        retunes the velocities and a wedge lingers, this fails rather than
+        letting a frozen shard sit on screen for two minutes.
+        """
+        import math
+
+        from naive_timer.shard import (
+            _OUTLINE, _SHATTER_CLEAR_S, _build_geometry,
+            _FLOATS_PER_VERTEX as stride,
+        )
+
+        data = _build_geometry()
+        verts_per_wedge = 3 * 8
+        t = _SHATTER_CLEAR_S
+        gravity_y = -0.32
+
+        for wedge in range(len(_OUTLINE)):
+            base = wedge * verts_per_wedge * stride
+            centre = data[base + 8 : base + 11]
+            vel = data[base + 11 : base + 14]
+
+            # Where the pivot ends up. Tumbling only swings vertices about
+            # this point, by at most the wedge's radius (~1.2 units).
+            x = centre[0] + vel[0] * t
+            y = centre[1] + vel[1] * t + 0.5 * gravity_y * t * t
+            self.assertGreater(
+                math.hypot(x, y), 1.2,
+                f"wedge {wedge} pivot still near frame at t={t}s",
+            )
+
+    def test_every_wedge_tumbles_and_travels(self):
+        """No piece may hang motionless in frame while the others leave.
+
+        Read from the real geometry, and assert only that each piece is
+        genuinely moving -- not some tuned magnitude, which changes whenever
+        the break is retuned.
+        """
+        import math
+
+        from naive_timer.shard import (
+            _FLOATS_PER_VERTEX as stride, _OUTLINE, _build_geometry,
+        )
+
+        data = _build_geometry()
+        verts_per_wedge = 3 * 8
+
+        for wedge in range(len(_OUTLINE)):
+            base = wedge * verts_per_wedge * stride
+            vel = data[base + 11 : base + 14]
+            axis = data[base + 14 : base + 17]
+
+            self.assertGreater(
+                math.sqrt(sum(v * v for v in vel)), 0.05,
+                f"wedge {wedge} never leaves: no linear velocity",
+            )
+            self.assertGreater(
+                math.sqrt(sum(a * a for a in axis)), 0.05,
+                f"wedge {wedge} never turns: no angular velocity",
+            )
 
     def test_text_image_has_ink_where_the_numerals_are(self):
         from naive_timer.shard import ShardParams, render_text_image
