@@ -18,6 +18,7 @@ uniform sampler2D uText;   // numerals, coverage in .a (white, premultiplied)
 uniform float uShatterT;   // seconds since the break; 0 while intact
 
 uniform vec3 uLightPos;    // offscreen light, world space
+uniform vec3 uLightColor;
 uniform vec3 uCamPos;
 uniform vec3 uGlassColor;
 uniform vec3 uTextColor;
@@ -60,8 +61,12 @@ void main() {
     float spec = pow(max(dot(N, H), 0.0), uSpecPower) * uSpecStrength;
     float fres = pow(1.0 - max(dot(N, V), 0.0), 3.0) * uFresnel;
 
-    vec3 col = uGlassColor * (0.12 + 0.40 * diff);
-    col += vec3(spec) + vec3(fres) * uGlassColor;
+    // The light tints what the light drives -- diffuse, specular, Fresnel --
+    // but not the ambient floor, and not the emissive numerals below, which
+    // glow on their own rather than reflecting anything.
+    vec3 col = uGlassColor * 0.12
+             + uGlassColor * (0.40 * diff) * uLightColor;
+    col += vec3(spec) * uLightColor + fres * uGlassColor * uLightColor;
 
     // Numerals. Emissive: they light up. Etched: they frost and scatter,
     // reading as absence rather than as light.
@@ -80,8 +85,9 @@ void main() {
     // computed per-piece from their tumbled normals -- was invisible for half
     // of every pulse.
     const vec3 ALARM_COLOR = vec3(0.38, 0.02, 0.03);
-    vec3 alarmLit = ALARM_COLOR * (0.55 + 1.7 * diff)
-                  + vec3(spec) * 0.55
+    vec3 alarmLit = ALARM_COLOR * 0.55
+                  + ALARM_COLOR * (1.7 * diff) * uLightColor
+                  + vec3(spec) * 0.55 * uLightColor
                   + fres * ALARM_COLOR * 1.5;
     col = mix(col, alarmLit, uAlarm);
     alpha = mix(alpha, alpha * 0.40 + 0.08, uAlarm);

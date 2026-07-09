@@ -122,6 +122,31 @@ _IDLE_SPIN_RATE = 0.12
 _SHATTER_CLEAR_S = 5.5
 
 
+def parse_hex_color(text: str) -> tuple:
+    """``"#ff8800"`` or ``"ff8800"`` -> ``(1.0, 0.533, 0.0)``.
+
+    Raises ``ValueError`` on anything else. Shorthand (``#f80``) is accepted
+    because people type it.
+    """
+    value = text.strip().lstrip("#")
+    if len(value) == 3:
+        value = "".join(c * 2 for c in value)
+    if len(value) != 6:
+        raise ValueError(f"expected RRGGBB or RGB, got {text!r}")
+    try:
+        channels = tuple(int(value[i : i + 2], 16) for i in (0, 2, 4))
+    except ValueError:
+        raise ValueError(f"{text!r} is not hexadecimal") from None
+    return tuple(c / 255.0 for c in channels)
+
+
+def format_hex_color(rgb) -> str:
+    """``(1.0, 0.533, 0.0)`` -> ``"#ff8800"``. Inverse of parse_hex_color."""
+    return "#" + "".join(
+        f"{max(0, min(255, round(c * 255.0))):02x}" for c in rgb
+    )
+
+
 @dataclass
 class ShardParams:
     """Everything the fragment shader can be tuned by."""
@@ -137,6 +162,7 @@ class ShardParams:
     base_alpha: float = 0.55
     glass_color: tuple = (0.16, 0.34, 0.52)
     text_color: tuple = (0.75, 0.93, 1.00)
+    light_color: tuple = (1.00, 1.00, 1.00)
     font_family: str = "monospace"
     font_bold: bool = True
 
@@ -512,7 +538,8 @@ class ShardWidget(QOpenGLWidget):
             name: program.uniformLocation(name)
             for name in (
                 "uText", "uModel", "uView", "uProj", "uNormalMat",
-                "uCamPos", "uLightPos", "uGlassColor", "uTextColor",
+                "uCamPos", "uLightPos", "uLightColor", "uGlassColor",
+                "uTextColor",
                 "uSpecPower", "uSpecStrength", "uFresnel", "uGlow",
                 "uEtch", "uBaseAlpha", "uAlarm", "uShatterT", "uSpin",
                 "uSpinAtBreak",
@@ -642,6 +669,7 @@ class ShardWidget(QOpenGLWidget):
         self._set("uNormalMat", model.normalMatrix())
         self._set("uCamPos", cam)
         self._set("uLightPos", QVector3D(p.light_x, p.light_y, p.light_z))
+        self._set("uLightColor", QVector3D(*p.light_color))
         self._set("uGlassColor", QVector3D(*p.glass_color))
         self._set("uTextColor", QVector3D(*p.text_color))
         self._set_float("uSpecPower", float(p.spec_power))

@@ -109,6 +109,38 @@ class NoGlTest(unittest.TestCase):
             u, v = data[base + 6 : base + 8]
             self.assertTrue(-0.5 <= u <= 1.5 and -0.5 <= v <= 1.5)
 
+    def test_hex_colors_parse(self):
+        from naive_timer.shard import parse_hex_color
+
+        self.assertEqual(parse_hex_color("#000000"), (0.0, 0.0, 0.0))
+        self.assertEqual(parse_hex_color("ffffff"), (1.0, 1.0, 1.0))
+        self.assertEqual(parse_hex_color("  #FFFFFF  "), (1.0, 1.0, 1.0))
+        self.assertEqual(parse_hex_color("#f00"), (1.0, 0.0, 0.0))
+
+        r, g, b = parse_hex_color("#ff8800")
+        self.assertAlmostEqual(r, 1.0)
+        self.assertAlmostEqual(g, 136 / 255)
+        self.assertAlmostEqual(b, 0.0)
+
+    def test_hex_colors_reject_garbage(self):
+        """The entry field sees every keystroke, including half-typed values."""
+        from naive_timer.shard import parse_hex_color
+
+        for bad in ("", "#", "#ff", "#fffff", "#gggggg", "12345678", "red"):
+            with self.assertRaises(ValueError, msg=f"{bad!r} should not parse"):
+                parse_hex_color(bad)
+
+    def test_hex_color_round_trip(self):
+        from naive_timer.shard import format_hex_color, parse_hex_color
+
+        for text in ("#000000", "#ffffff", "#ff8800", "#1a2b3c"):
+            self.assertEqual(format_hex_color(parse_hex_color(text)), text)
+
+    def test_format_hex_color_clamps(self):
+        from naive_timer.shard import format_hex_color
+
+        self.assertEqual(format_hex_color((-1.0, 0.5, 2.0)), "#0080ff")
+
     def test_numerals_stay_inside_the_bevel(self):
         """Ink must land on the front face, never spill onto the chamfer.
 
@@ -381,6 +413,50 @@ class GlTest(unittest.TestCase):
 
         shard.set_alarm(False)
         self.assertEqual(shard._shatter_t, 0.0, "reset reassembles the shard")
+
+    def test_light_color_reaches_the_shader(self):
+        """Render twice under different lights; the pixels must differ.
+
+        Uniform wiring fails silently in PySide6 -- a float bound to the int
+        overload of setUniformValue truncates to 0 with no error. Only looking
+        at the framebuffer catches that.
+        """
+        from PySide6.QtWidgets import QApplication
+
+        from naive_timer.shard import ShardWidget, parse_hex_color
+
+        class Model:
+            is_running = False
+
+        shard = ShardWidget(Model())
+        shard.resize(160, 160)
+        shard.set_text("00:00:00.00")
+        shard.show()
+        QApplication.processEvents()
+
+        def render(hex_color):
+            shard.params.light_color = parse_hex_color(hex_color)
+            shard.makeCurrent()
+            shard.paintGL()
+            return shard.grabFramebuffer()
+
+        white = render("#ffffff")
+        warm = render("#ff5522")
+
+        differing = sum(
+            1
+            for y in range(0, white.height(), 4)
+            for x in range(0, white.width(), 4)
+            if max(
+                abs(
+                    white.pixelColor(x, y).getRgb()[i]
+                    - warm.pixelColor(x, y).getRgb()[i]
+                )
+                for i in range(3)
+            )
+            > 8
+        )
+        self.assertGreater(differing, 20, "light colour never reached the shader")
 
     def test_idle_rotation_ignores_whether_the_model_runs(self):
         """Speeding up on start drew the eye away from the numerals."""

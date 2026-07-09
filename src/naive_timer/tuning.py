@@ -15,18 +15,23 @@ from PySide6.QtCore import Qt
 from PySide6.QtGui import QFont
 from PySide6.QtWidgets import (
     QCheckBox,
-    QComboBox,
     QFontComboBox,
     QFormLayout,
     QGroupBox,
     QLabel,
+    QLineEdit,
     QPushButton,
     QSlider,
     QVBoxLayout,
     QWidget,
 )
 
-from .shard import ShardParams, ShardWidget
+from .shard import (
+    ShardParams,
+    ShardWidget,
+    format_hex_color,
+    parse_hex_color,
+)
 
 
 def enabled() -> bool:
@@ -46,20 +51,28 @@ _SLIDERS = [
     ("base_alpha", 0.0, 1.0),
 ]
 
-_PRESET_TEXT_COLORS = {
-    "ice": (0.75, 0.93, 1.00),
-    "amber": (1.00, 0.72, 0.25),
-    "white": (1.00, 1.00, 1.00),
-    "mint": (0.60, 1.00, 0.80),
-    "red": (1.00, 0.35, 0.30),
-}
+class _HexColorEdit(QLineEdit):
+    """A 24-bit RRGGBB entry that only applies a value once it is valid.
 
-_PRESET_GLASS_COLORS = {
-    "blue": (0.16, 0.34, 0.52),
-    "smoke": (0.22, 0.22, 0.26),
-    "teal": (0.10, 0.40, 0.42),
-    "violet": (0.30, 0.18, 0.52),
-}
+    Typing "#ff" should not blank the shard on the way to "#ff8800", so an
+    unparseable value tints the field red and changes nothing.
+    """
+
+    def __init__(self, initial: tuple, on_change) -> None:
+        super().__init__(format_hex_color(initial))
+        self._on_change = on_change
+        self.setMaxLength(7)
+        self.setPlaceholderText("#rrggbb")
+        self.textChanged.connect(self._apply)
+
+    def _apply(self, text: str) -> None:
+        try:
+            rgb = parse_hex_color(text)
+        except ValueError:
+            self.setStyleSheet("background-color:#5a2020;")
+            return
+        self.setStyleSheet("")
+        self._on_change(rgb)
 
 
 class TuningPanel(QWidget):
@@ -114,19 +127,20 @@ class TuningPanel(QWidget):
         self._bold.toggled.connect(self._on_bold)
         aform.addRow("bold", self._bold)
 
-        self._text_color = QComboBox()
-        self._text_color.addItems(list(_PRESET_TEXT_COLORS))
-        self._text_color.currentTextChanged.connect(
-            lambda k: self._set("text_color", _PRESET_TEXT_COLORS[k])
+        self._text_color = _HexColorEdit(
+            self._params.text_color, lambda c: self._set("text_color", c)
         )
-        aform.addRow("text color", self._text_color)
+        aform.addRow("text / glow", self._text_color)
 
-        self._glass_color = QComboBox()
-        self._glass_color.addItems(list(_PRESET_GLASS_COLORS))
-        self._glass_color.currentTextChanged.connect(
-            lambda k: self._set("glass_color", _PRESET_GLASS_COLORS[k])
+        self._glass_color = _HexColorEdit(
+            self._params.glass_color, lambda c: self._set("glass_color", c)
         )
-        aform.addRow("glass color", self._glass_color)
+        aform.addRow("glass", self._glass_color)
+
+        self._light_color = _HexColorEdit(
+            self._params.light_color, lambda c: self._set("light_color", c)
+        )
+        aform.addRow("light", self._light_color)
 
         outer.addWidget(appearance)
 
@@ -157,8 +171,10 @@ class TuningPanel(QWidget):
         print("\n# --- paste into ShardParams defaults ---")
         for name, _lo, _hi in _SLIDERS:
             print(f"    {name}: float = {getattr(p, name):.2f}")
-        print(f"    glass_color: tuple = {p.glass_color}")
-        print(f"    text_color: tuple = {p.text_color}")
+        for name in ("glass_color", "text_color", "light_color"):
+            rgb = getattr(p, name)
+            pretty = ", ".join(f"{c:.3f}" for c in rgb)
+            print(f"    {name}: tuple = ({pretty})  # {format_hex_color(rgb)}")
         print(f'    font_family: str = "{p.font_family}"')
         print(f"    font_bold: bool = {p.font_bold}")
         print("# ---------------------------------------\n")
