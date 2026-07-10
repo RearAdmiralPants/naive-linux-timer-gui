@@ -75,13 +75,21 @@ class ShatterTest(unittest.TestCase):
             self.assertNotEqual(open(a, "rb").read(), open(c, "rb").read())
 
     def test_does_not_click_at_either_end(self) -> None:
-        """A clip that starts or stops mid-waveform pops on playback."""
-        with tempfile.TemporaryDirectory() as d:
-            path = os.path.join(d, "shatter.wav")
-            generate_shatter_wav(path, seconds=0.6)
-            samples, _rate = _read(path)
-            self.assertLess(abs(samples[0]), 0.02)
-            self.assertLess(abs(samples[-1]), 0.005, "no fade-out at the tail")
+        """A clip that starts or stops mid-waveform pops on playback.
+
+        Swept across seeds on purpose. This assertion used to hold for the
+        default seed alone, by luck: there was no fade-in, so the first sample
+        was just whatever the RNG drew, and most draws click.
+        """
+        for seed in range(8):
+            with tempfile.TemporaryDirectory() as d:
+                path = os.path.join(d, "shatter.wav")
+                generate_shatter_wav(path, seconds=0.6, seed=seed)
+                samples, _rate = _read(path)
+                self.assertLess(abs(samples[0]), 0.02, f"click at onset, seed={seed}")
+                self.assertLess(
+                    abs(samples[-1]), 0.005, f"no fade-out at the tail, seed={seed}"
+                )
 
     def test_energy_decays_rather_than_sustaining(self) -> None:
         """Breaking glass rings down. A drone would mean the envelopes broke."""
