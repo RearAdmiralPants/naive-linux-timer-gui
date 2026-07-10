@@ -82,6 +82,21 @@ class NoGlTest(unittest.TestCase):
             player._effect.loopCount(), QSoundEffect.Loop.Infinite.value
         )
 
+    def test_shatter_plays_once_and_the_chime_loops(self):
+        """An infinitely looping shatter would be unbearable."""
+        from naive_timer import app
+
+        if not app._HAVE_AUDIO:
+            self.skipTest("QtMultimedia unavailable; alert is visual-only")
+
+        from PySide6.QtMultimedia import QSoundEffect
+
+        player = app._AlertPlayer()
+        self.assertEqual(player._shatter.loopCount(), 1)
+        self.assertEqual(
+            player._effect.loopCount(), QSoundEffect.Loop.Infinite.value
+        )
+
     def test_geometry_is_a_solid_of_flat_shaded_facets(self):
         from naive_timer.shard import (
             _FLOATS_PER_VERTEX as floats_per_vertex,

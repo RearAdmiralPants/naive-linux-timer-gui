@@ -245,12 +245,42 @@ backdrop would slide against the geometry.
   nebula's own void colour, which made a "did the sky draw?" test pass even
   with the sky pass deleted.
 
-**Sound** — deferred, see *Asset licensing* below
+**Sound** — branch `feat/shatter-sound`
 
-- [ ] **Shatter sound on fracture.** Must be synthesized or CC0; see below.
-- [ ] Sequence it with the visual shatter, under the existing looping chime.
-- [ ] `QSoundEffect` decodes **only uncompressed WAV**. Compressed formats need
-  `QMediaPlayer` + `QAudioOutput`.
+- [x] **Shatter sound on fracture**, synthesized in `sound.py`. Three layers:
+  an impact transient (a high-passed noise crack plus a low-passed body), a set
+  of inharmonic resonant partials, and a long thinning scatter of fragment
+  grains. Deterministic per `seed`; `amplitude` is the peak *after*
+  normalisation, so it means headroom directly.
+- [x] Plays once at the break, under the looping chime. Both files are
+  synthesized at runtime; still no binary assets.
+- [x] Temp files are now per-uid and versioned
+  (`naive_timer_shatter_<uid>_v<N>.wav`). `/tmp` is shared, so the old fixed
+  name collided between users; and without the version suffix, editing the
+  synthesis silently served a stale cached WAV.
+
+Tuned **against the reference recordings**, not by ear (they cannot be shipped,
+but measuring them is fair use of a listening reference):
+
+| clip | dur s | peak dB | ZCR Hz | decay→10% |
+|------|------:|--------:|-------:|----------:|
+| synth | 2.60 | −13.2 | 9824 | 1.3 s |
+| ref1 | 1.56 | −6.1 | 8316 | 1.1 s |
+| ref2 | 1.72 | −5.5 | 9143 | 1.2 s |
+| ref3 | 2.65 | −6.4 | 6228 | 0.1 s |
+
+Zero-crossing rate is a cheap brightness proxy. The first synth version had all
+its partials above 1200 Hz and measured **13.2 kHz** — it would have read as a
+cymbal, not glass. A third of the resonances now sit at 180–900 Hz, in the body
+of the pane, and a low-passed noise "crunch" was added under the crack.
+
+`_add_decaying_sine` uses a two-term sine recurrence rather than `math.sin` per
+sample: ~140 partials over 100k+ samples took 1.9 s to generate (a visible
+freeze at startup, since `_AlertPlayer` is built in `MainWindow.__init__`) and
+now takes 0.56 s.
+
+Still true: **`QSoundEffect` decodes only uncompressed WAV.** It errors on FLAC.
+Compressed formats need `QMediaPlayer` + `QAudioOutput`.
 
 **Unbuilt feature from `CLAUDE.md`**
 

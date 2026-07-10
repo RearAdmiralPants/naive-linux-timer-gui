@@ -203,7 +203,11 @@ class TimerWidget(QWidget):
 
 
 class _AlertPlayer:
-    """Loops the generated chime quietly until stopped."""
+    """The shatter, once, then the chime looping quietly until stopped.
+
+    Both are synthesized at runtime (see ``sound.py``); no binary assets. Note
+    that QSoundEffect decodes only uncompressed WAV -- it errors on FLAC.
+    """
 
     def __init__(self) -> None:
         self._effect = QSoundEffect()
@@ -211,10 +215,21 @@ class _AlertPlayer:
         self._effect.setLoopCount(QSoundEffect.Loop.Infinite.value)
         self._effect.setVolume(0.35)
 
+        # One-shot, played the instant the shard breaks. Its own file is
+        # already ~7 dB below the reference recordings, so this stays near
+        # unity; turn the WAV's `amplitude` down rather than this, so the
+        # headroom is baked in.
+        self._shatter = QSoundEffect()
+        self._shatter.setSource(QUrl.fromLocalFile(sound.default_shatter_path()))
+        self._shatter.setLoopCount(1)
+        self._shatter.setVolume(0.9)
+
     def play(self) -> None:
+        self._shatter.play()
         self._effect.play()
 
     def stop(self) -> None:
+        self._shatter.stop()
         self._effect.stop()
 
 
