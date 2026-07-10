@@ -474,6 +474,68 @@ class GlTest(unittest.TestCase):
         expected = (QVector3D(0, 0, 0) - eye).normalized()
         self.assertAlmostEqual(QVector3D.dotProduct(forward, expected), 1.0, places=5)
 
+    def test_etched_numerals_have_no_2x2_quad_structure(self):
+        """The engraving must not be stair-stepped by screen-space derivatives.
+
+        dFdx/dFdy are evaluated once per 2x2 pixel quad. If the coverage
+        gradient is taken that way, pixels inside a quad share a value and jump
+        at quad boundaries -- visible as speckled, stair-stepped glyph edges.
+        A texture-space central difference has no such structure.
+
+        Measured as: mean |luminance difference| between horizontally adjacent
+        pixels, split by whether the pair straddles a quad boundary. Equal means
+        no quad structure.
+        """
+        from PySide6.QtWidgets import QApplication
+
+        from naive_timer.shard import ShardParams, ShardWidget
+
+        class Model:
+            is_running = False
+
+        params = ShardParams()
+        params.etch = 1.0
+        params.glow = 0.2
+        params.orbit_speed = 0.0     # hold the camera still
+        params.orbit_radius = 1.55   # close in, so the glyphs are magnified
+        params.orbit_height = 0.0
+
+        shard = ShardWidget(Model(), params)
+        shard.resize(360, 360)
+        shard.set_text("00:00:00.00")
+        shard.show()
+        QApplication.processEvents()
+
+        shard.makeCurrent()
+        shard.paintGL()
+        image = shard.grabFramebuffer()
+
+        def luminance(x, y):
+            r, g, b = image.pixelColor(x, y).getRgb()[:3]
+            return 0.2126 * r + 0.7152 * g + 0.0722 * b
+
+        inside, across = [], []
+        for y in range(140, 240, 3):
+            previous = luminance(100, y)
+            for x in range(101, 260):
+                current = luminance(x, y)
+                delta = abs(current - previous)
+                # 2x2 quads align to even x: (even, odd) is inside one quad.
+                (inside if (x - 1) % 2 == 0 else across).append(delta)
+                previous = current
+
+        mean_inside = sum(inside) / len(inside)
+        mean_across = sum(across) / len(across)
+        if mean_inside < 1e-6:
+            self.fail("degenerate render: no variation along the scanlines")
+
+        ratio = mean_across / mean_inside
+        self.assertLess(
+            ratio, 1.6,
+            f"etched edges show 2x2 quad structure (ratio {ratio:.2f}); "
+            "the coverage gradient is coming from dFdx/dFdy again",
+        )
+
     def test_light_color_reaches_the_shader(self):
         """Render twice under different lights; the pixels must differ.
 

@@ -28,6 +28,7 @@ uniform float uSpecStrength;
 uniform float uFresnel;       // rim brightness at grazing angles
 uniform float uGlow;          // emissive numerals
 uniform float uEtch;          // 0 = emissive/lit, 1 = etched into the glass
+uniform float uEtchDepth;     // how sharply the engraving tilts the normal
 uniform float uBaseAlpha;
 
 uniform float uAlarm;         // 0..1, pulses after the countdown hits zero
@@ -47,10 +48,29 @@ void main() {
 
     // Etched numerals: bump the surface normal by the gradient of the glyph
     // coverage, so the engraving catches the light at its edges rather than
-    // being painted on flat. dFdx/dFdy give us that gradient for free.
+    // being painted on flat.
+    //
+    // The gradient is a *central difference in texture space*, not dFdx/dFdy.
+    // Screen-space derivatives are evaluated once per 2x2 pixel quad, so on a
+    // magnified glyph edge they are near-zero inside a quad and jump at its
+    // boundary -- which is the stair-stepped, speckled engraving this replaces.
+    //
+    // The step is at least one texel (never sample inside a single texel and
+    // read pure interpolation noise) and at least one pixel footprint (never
+    // sample finer than the pixel actually covers, which would alias). fwidth
+    // is still a screen-space derivative, but of vUV, which varies smoothly
+    // across the face -- so it contributes no speckle of its own.
     if (uEtch > 0.0) {
-        vec2 grad = vec2(dFdx(cov), dFdy(cov));
-        N = normalize(N - uEtch * vec3(grad * 18.0, 0.0));
+        vec2 texel = 1.0 / vec2(textureSize(uText, 0));
+        vec2 step = max(texel, fwidth(vUV));
+
+        float left = texture(uText, vUV - vec2(step.x, 0.0)).a;
+        float right = texture(uText, vUV + vec2(step.x, 0.0)).a;
+        float down = texture(uText, vUV - vec2(0.0, step.y)).a;
+        float up = texture(uText, vUV + vec2(0.0, step.y)).a;
+
+        vec2 grad = vec2(right - left, up - down) * 0.5;
+        N = normalize(N - uEtch * vec3(grad * uEtchDepth, 0.0));
     }
 
     vec3 L = normalize(uLightPos - vWorld);

@@ -129,16 +129,27 @@ by dependency, not by priority.
   `aPieceAxis`), integrated in the vertex shader against elapsed `uShatterT`.
   Pieces tumble about *their own* centroids and recede under gravity. The old
   pinwheel came from rotating every piece about the shard's centre.
-- [ ] **Etch speckle on glyph edges.** *Not* a grazing-angle effect — that was
-  a wrong guess, disproved by rendering the same camera angle at `etch = 0`
-  (clean) and `etch = 1` (speckled). `shard.frag` perturbs the surface normal
-  by the screen-space derivative of glyph coverage, scaled by a flat `18.0`.
-  `dFdx`/`dFdy` are evaluated per 2×2 pixel quad, so across a magnified glyph
-  edge the derivative is ~0 inside a quad and jumps at quad boundaries; the
-  `18.0` amplifies that quantisation into stair-steps and stray bright pixels.
-  Fix by computing the gradient in *texture* space — central-difference the
-  coverage at ±1 texel via `textureSize()` — rather than from screen
-  derivatives. Clamping the magnitude is a lesser mitigation.
+- [x] **Etch speckle on glyph edges** — fixed. *Not* a grazing-angle effect;
+  that was a wrong guess, disproved by rendering the same camera angle at
+  `etch = 0` (clean) and `etch = 1` (speckled). The shader perturbed the normal
+  by the *screen-space* derivative of glyph coverage, scaled by a flat `18.0`.
+  `dFdx`/`dFdy` are evaluated once per 2×2 pixel quad, so across a magnified
+  glyph edge the derivative is ~0 inside a quad and jumps at quad boundaries.
+  It now takes a **central difference in texture space**, stepping by
+  `max(texel, fwidth(vUV))` — at least one texel, and never finer than the
+  pixel's own footprint. `fwidth` is still a screen derivative, but of `vUV`,
+  which varies smoothly across the face, so it adds no speckle of its own.
+  The tilt is now the `etch_depth` param (default 3.0), not a magic `18.0`.
+
+  **How to measure this artefact.** `dFdx` freezes a value across each 2×2
+  quad, so its signature is that horizontally adjacent pixels *inside* a quad
+  agree while pairs *straddling* a quad boundary jump. Take the mean absolute
+  luminance difference for each group; their ratio was **2.46** before and
+  **1.05** after (1.0 = no quad structure). Two earlier metrics were useless
+  and nearly misled me: counting "salt-and-pepper" pixels went *up* after the
+  fix, because it counted the new engraved rim highlight; counting hard
+  luminance steps was flat, because those are the glyph's own colour edge.
+  Measure the artefact, not a proxy for it.
 
 Notes for whoever touches the shatter next:
 
@@ -198,12 +209,15 @@ Render and measure; do not reason about it. Each of these caught a real bug:
   moment the camera moved.
 - [x] **The camera sways**, it does not orbit. See below.
 
-Cost: 2.58 ms/frame for the whole scene at 420x620 — 15.4% of a 60 fps budget,
-a 388 fps ceiling. That is **4x** the screen-space version's 0.64 ms, because
-3D value noise needs 8 lattice hashes per octave against 2D's 4, and there are
-two 5-octave fBm calls per pixel. Still cheap, but it is the first change here
-with a real cost. If it ever matters: fewer octaves, or bake the sky into a
-cubemap once and sample it.
+Cost: roughly **2.3–4.4 ms/frame** for the whole scene at 420x620 — a wide
+spread, because an integrated GPU with dynamic clocks gives noisy single
+samples. Call it well under half a 60 fps budget. It is clearly dearer than the
+screen-space version (~0.6 ms), since 3D value noise needs 8 lattice hashes per
+octave against 2D's 4, twice over for the domain warp. Cheap enough to keep. If
+it ever matters: fewer octaves, or bake the sky into a cubemap once.
+
+Do not quote a single benchmark run to three significant figures, as an earlier
+version of this file did. Run it several times and give the range.
 
 ### Why the camera sways instead of orbiting
 

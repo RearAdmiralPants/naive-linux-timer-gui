@@ -162,6 +162,11 @@ class ShardParams:
     fresnel: float = 0.55
     glow: float = 0.90
     etch: float = 0.0
+    # Tilt applied to the normal per unit of coverage gradient. The gradient is
+    # now a texture-space central difference (magnitude up to ~0.5), where it
+    # used to be a screen-space derivative (far smaller), so this is a much
+    # smaller number than the old hardcoded 18.0.
+    etch_depth: float = 3.0
     base_alpha: float = 0.55
     glass_color: tuple = (0.16, 0.34, 0.52)
     text_color: tuple = (0.75, 0.93, 1.00)
@@ -578,7 +583,8 @@ class ShardWidget(QOpenGLWidget):
                 "uCamPos", "uLightPos", "uLightColor", "uGlassColor",
                 "uTextColor",
                 "uSpecPower", "uSpecStrength", "uFresnel", "uGlow",
-                "uEtch", "uBaseAlpha", "uAlarm", "uShatterT", "uSpin",
+                "uEtch", "uEtchDepth", "uBaseAlpha", "uAlarm", "uShatterT",
+                "uSpin",
                 "uSpinAtBreak",
             )
         }
@@ -836,6 +842,7 @@ class ShardWidget(QOpenGLWidget):
         self._set_float("uFresnel", float(p.fresnel))
         self._set_float("uGlow", float(p.glow))
         self._set_float("uEtch", float(p.etch))
+        self._set_float("uEtchDepth", float(p.etch_depth))
         self._set_float("uBaseAlpha", float(p.base_alpha))
         self._set_float("uAlarm", float(alarm))
         self._set_float("uShatterT", float(self._shatter_t))

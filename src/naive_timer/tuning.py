@@ -48,6 +48,7 @@ _SLIDERS = [
     ("fresnel", 0.0, 2.0),
     ("glow", 0.0, 2.0),
     ("etch", 0.0, 1.0),
+    ("etch_depth", 0.0, 12.0),
     ("base_alpha", 0.0, 1.0),
 ]
 
