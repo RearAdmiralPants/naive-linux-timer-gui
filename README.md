@@ -44,6 +44,38 @@ system Python, `sudo pip install` is both blocked and a good way to break
 ## Run it
 
 ```bash
+./launch.sh
+```
+
+That creates `.venv` on first run, installs the project into it, and starts the
+app. It re-installs whenever `pyproject.toml` changes, so a new dependency never
+leaves you on a stale environment. Arguments are forwarded to the app.
+
+On a laptop with both an integrated and a discrete GPU, OpenGL uses the
+integrated one unless asked otherwise — and at 4K that can be the difference
+between 17 and 140 FPS. Pick explicitly:
+
+```bash
+./launch.sh --gpu list      # what GPUs does this machine have?
+./launch.sh --gpu nvidia    # the discrete GPU, via PRIME offload
+./launch.sh --gpu intel     # the integrated GPU
+```
+
+Whether the discrete GPU is actually faster depends on the pairing, so measure
+rather than assume — `tools/bench-gpu.sh` times the real sky shader on each GPU
+at your display's resolution. See [docs/HANDOFF.md](docs/HANDOFF.md) for what
+the numbers mean.
+
+Creating the virtualenv needs `ensurepip`, which Debian and Ubuntu split into a
+separate package. If `launch.sh` tells you it is missing:
+
+```bash
+sudo apt install python3-venv
+```
+
+The equivalent by hand, if you would rather not use the script:
+
+```bash
 python3 -m venv .venv
 .venv/bin/python -m pip install -e .
 .venv/bin/python -m naive_timer
@@ -94,7 +126,8 @@ shader that fails to compile prints the error and leaves the previous one
 running, so you cannot break the app from there.
 
 ```bash
-NAIVE_TIMER_TUNE=1 .venv/bin/python -m naive_timer
+./launch.sh                      # the panel is on by default
+NAIVE_TIMER_TUNE=0 ./launch.sh   # ... without it
 ```
 
 That adds a panel with live sliders for every uniform — light position,
