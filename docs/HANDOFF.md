@@ -366,15 +366,68 @@ resolves to.
 
 ```bash
 sudo apt install libxcb-cursor0 xvfb        # xcb plugin dep + headless GL; not in the wheel
-python3 -m venv .venv                       # system Python is externally managed
+sudo apt install python3-venv               # ensurepip; Debian/Ubuntu split it out
+
+./launch.sh                     # creates .venv on first run, then see/hear the GUI
+NAIVE_TIMER_TUNE=0 ./launch.sh  # ... without the shader tuning panel
+```
+
+`launch.sh` re-installs whenever `pyproject.toml` changes, keyed on a hash it
+stores in `.venv/.pyproject.sha256`. It installs `-e .`, not `-e ".[dev]"` — the
+tests below are stdlib `unittest`, so they need no extras. For the `[dev]` pytest
+extra, install into the venv the script built:
+
+```bash
 .venv/bin/python -m pip install -e ".[dev]"
 
 .venv/bin/python -m unittest discover -s tests -v   # with a display: everything
 xvfb-run -a .venv/bin/python -m unittest discover -s tests -v   # headless, incl. GL tier
-
-.venv/bin/python -m naive_timer                     # see/hear the GUI
-NAIVE_TIMER_TUNE=1 .venv/bin/python -m naive_timer  # ... with the shader tuning panel
 ```
+
+### Which GPU it runs on
+
+On a hybrid-graphics machine, OpenGL goes to the **integrated** GPU unless a
+program asks otherwise — which at 4K is the difference between a smooth app and
+a slideshow. Select a GPU with `--gpu`:
+
+```bash
+./launch.sh --gpu list      # what does this machine have?
+./launch.sh --gpu nvidia    # discrete, via PRIME offload
+./launch.sh --gpu intel     # integrated
+./launch.sh                 # whatever the system picks (usually integrated)
+```
+
+This is a **GLX vendor switch, not CUDA**. The app is OpenGL 3.3 core and never
+touches CUDA; an AMD card would be selected the same way, via `DRI_PRIME`. The
+mechanics live in `gpu-select.sh`, shared by `launch.sh` and the benchmark.
+
+**Do not assume the discrete GPU wins.** It depends entirely on the pairing, and
+PRIME copies every rendered frame back to the display-connected iGPU, which at
+4K is not free. Measure with `tools/bench-gpu.sh`, which times the real
+`sky.frag` on each GPU at the display's resolution:
+
+```bash
+tools/bench-gpu.sh              # display resolution
+tools/bench-gpu.sh 1920 1080    # or an explicit one
+```
+
+Measured on the RTX 3050 box at 3840x2400 (`sky.frag` only — this excludes the
+shard, and excludes PRIME's copy-back, so both columns are optimistic):
+
+| GPU | ms/frame | ceiling |
+| --- | --- | --- |
+| Intel UHD (TGL GT1) | 58.3 | 17 FPS |
+| RTX 3050 Laptop (PRIME offload) | 7.1 | 140 FPS |
+
+The budget is 16 ms (`FRAME_MS` in `app.py`), so the iGPU misses it by 3.6x.
+
+Note the scaling: 4x the pixels costs the Intel 4.03x the time. `sky.frag` is
+cleanly fill-rate bound, which means **resolution is the whole story** and a
+faster GPU only buys headroom against an extravagant per-pixel cost — two
+5-octave 3D fbm calls plus three star layers, recomputed from scratch every
+frame for a backdrop that changes glacially. Baking the sky into a cubemap and
+refreshing a face at a time would fix this on *every* GPU. Until that happens,
+a machine without a strong discrete GPU will not hold 60 FPS at 4K.
 
 Without a display **and** without `xvfb-run`, the GL tier of the smoke test
 skips itself: Qt's `offscreen` platform has no OpenGL, and constructing a
