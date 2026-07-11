@@ -18,6 +18,7 @@ from PySide6.QtWidgets import (
     QFontComboBox,
     QFormLayout,
     QGroupBox,
+    QHBoxLayout,
     QLabel,
     QLineEdit,
     QPushButton,
@@ -104,14 +105,27 @@ class TuningPanel(QWidget):
         # can't be mistaken for a second main window.
         self.setWindowFlag(Qt.Tool, True)
         self.setWindowTitle("Shard tuning (dev)")
-        self.setMinimumWidth(320)
+        self.setMinimumWidth(640)
 
         outer = QVBoxLayout(self)
         self._labels: dict[str, QLabel] = {}
 
-        outer.addWidget(self._slider_group("Glass", _SLIDERS))
-        outer.addWidget(self._slider_group("Camera", _CAMERA_SLIDERS))
-        outer.addWidget(self._slider_group("Sky", _SKY_SLIDERS))
+        # Two columns so the panel stops overflowing the screen. The split is
+        # semantic, not just arithmetic: the left column is how the shard
+        # *looks* (its glass and the colour/font appearance box), the right is
+        # the *scene* it sits in (camera and sky). That also balances the
+        # heights — the tall Glass group is offset by the two shorter scene
+        # groups stacked together.
+        columns = QHBoxLayout()
+        outer.addLayout(columns)
+        left = QVBoxLayout()
+        right = QVBoxLayout()
+        columns.addLayout(left)
+        columns.addLayout(right)
+
+        left.addWidget(self._slider_group("Glass", _SLIDERS))
+        right.addWidget(self._slider_group("Camera", _CAMERA_SLIDERS))
+        right.addWidget(self._slider_group("Sky", _SKY_SLIDERS))
 
         appearance = QGroupBox("Numerals")
         aform = QFormLayout(appearance)
@@ -153,12 +167,16 @@ class TuningPanel(QWidget):
         )
         aform.addRow("nebula B", self._nebula_b)
 
-        outer.addWidget(appearance)
+        left.addWidget(appearance)
+
+        # Pin each column's groups to the top; the shorter one pads at the
+        # bottom rather than stretching its groups to fill.
+        left.addStretch(1)
+        right.addStretch(1)
 
         dump = QPushButton("Print params")
         dump.clicked.connect(self._dump)
         outer.addWidget(dump)
-        outer.addStretch(1)
 
     def _slider_group(self, title: str, specs) -> QGroupBox:
         box = QGroupBox(title)
