@@ -9,18 +9,22 @@ Deliberately ugly and deliberately not in the shipped UI.
 
 from __future__ import annotations
 
+import dataclasses
+import json
 import os
 
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QFont
 from PySide6.QtWidgets import (
     QCheckBox,
+    QFileDialog,
     QFontComboBox,
     QFormLayout,
     QGroupBox,
     QHBoxLayout,
     QLabel,
     QLineEdit,
+    QMessageBox,
     QPushButton,
     QSlider,
     QVBoxLayout,
@@ -37,6 +41,28 @@ from .shard import (
 
 def enabled() -> bool:
     return os.environ.get("NAIVE_TIMER_TUNE") == "1"
+
+
+def params_to_json(params: ShardParams) -> str:
+    """A ShardParams as pretty JSON. Colour tuples become JSON arrays."""
+    return json.dumps(dataclasses.asdict(params), indent=2)
+
+
+def apply_json_dict(params: ShardParams, data: dict) -> None:
+    """Fold a loaded dict into ``params`` in place.
+
+    Only known fields are touched, so a file from an older or newer build loads
+    what it can and ignores the rest instead of crashing. JSON has no tuples, so
+    any field whose current value is a tuple (the colours) is coerced back --
+    the shader indexes colours as ``rgb[0..2]`` and a stray list would still
+    work, but keeping the type honest avoids surprises elsewhere.
+    """
+    for name, value in data.items():
+        if not hasattr(params, name):
+            continue
+        if isinstance(getattr(params, name), tuple):
+            value = tuple(value)
+        setattr(params, name, value)
 
 
 # name, minimum, maximum  (floats, scaled by 100 through the int slider)
@@ -109,6 +135,7 @@ class TuningPanel(QWidget):
 
         outer = QVBoxLayout(self)
         self._labels: dict[str, QLabel] = {}
+        self._sliders: dict[str, QSlider] = {}
 
         # Two columns so the panel stops overflowing the screen. The split is
         # semantic, not just arithmetic: the left column is how the shard
@@ -174,9 +201,20 @@ class TuningPanel(QWidget):
         left.addStretch(1)
         right.addStretch(1)
 
-        dump = QPushButton("Print params")
-        dump.clicked.connect(self._dump)
-        outer.addWidget(dump)
+        # Where Save/Load default to, remembered across a session so the second
+        # click doesn't make you navigate again.
+        self._settings_path = os.path.join(os.getcwd(), "shard_params.json")
+
+        buttons = QHBoxLayout()
+        for text, slot in (
+            ("Save…", self._save),
+            ("Load…", self._load),
+            ("Print params", self._dump),
+        ):
+            button = QPushButton(text)
+            button.clicked.connect(slot)
+            buttons.addWidget(button)
+        outer.addLayout(buttons)
 
     def _slider_group(self, title: str, specs) -> QGroupBox:
         box = QGroupBox(title)
@@ -187,6 +225,7 @@ class TuningPanel(QWidget):
             slider.setValue(int(getattr(self._params, name) * 100))
             label = QLabel(f"{getattr(self._params, name):.2f}")
             self._labels[name] = label
+            self._sliders[name] = slider
             slider.valueChanged.connect(
                 lambda v, n=name: self._on_slider(n, v / 100.0)
             )
@@ -214,6 +253,75 @@ class TuningPanel(QWidget):
         # moved the Timer tab looked dead while the Stopwatch tab was in front.
         for shard in self._shards:
             shard.refresh_params()
+
+    def _save(self) -> None:
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Save shard settings", self._settings_path,
+            "JSON (*.json)",
+        )
+        if not path:
+            return
+        self._settings_path = path
+        try:
+            with open(path, "w") as fh:
+                fh.write(params_to_json(self._params))
+        except OSError as exc:
+            QMessageBox.warning(self, "Save failed", str(exc))
+
+    def _load(self) -> None:
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Load shard settings", self._settings_path,
+            "JSON (*.json)",
+        )
+        if not path:
+            return
+        self._settings_path = path
+        try:
+            with open(path) as fh:
+                data = json.load(fh)
+        except (OSError, ValueError) as exc:
+            QMessageBox.warning(self, "Load failed", str(exc))
+            return
+
+        apply_json_dict(self._params, data)
+        self._sync_widgets()
+        for shard in self._shards:
+            shard.refresh_params()
+
+    def _sync_widgets(self) -> None:
+        """Pull every control back into line with ``self._params``.
+
+        Load is the only path that changes params behind the widgets' backs, so
+        signals are blocked here: we set each control's displayed value without
+        letting it echo back into params (and without firing a shard refresh per
+        control -- the caller refreshes once at the end).
+        """
+        for name, slider in self._sliders.items():
+            value = getattr(self._params, name)
+            slider.blockSignals(True)
+            slider.setValue(int(value * 100))
+            slider.blockSignals(False)
+            self._labels[name].setText(f"{value:.2f}")
+
+        self._font_combo.blockSignals(True)
+        self._font_combo.setCurrentFont(QFont(self._params.font_family))
+        self._font_combo.blockSignals(False)
+
+        self._bold.blockSignals(True)
+        self._bold.setChecked(self._params.font_bold)
+        self._bold.blockSignals(False)
+
+        for edit, name in (
+            (self._text_color, "text_color"),
+            (self._glass_color, "glass_color"),
+            (self._light_color, "light_color"),
+            (self._nebula_a, "nebula_color_a"),
+            (self._nebula_b, "nebula_color_b"),
+        ):
+            edit.blockSignals(True)
+            edit.setText(format_hex_color(getattr(self._params, name)))
+            edit.setStyleSheet("")
+            edit.blockSignals(False)
 
     def _dump(self) -> None:
         p: ShardParams = self._params

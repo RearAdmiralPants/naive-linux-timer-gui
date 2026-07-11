@@ -372,6 +372,48 @@ class NoGlTest(unittest.TestCase):
                 f"wedge {wedge} never turns: no angular velocity",
             )
 
+    def test_settings_round_trip_through_json(self):
+        """Save then load must reproduce every field, colours included.
+
+        JSON has no tuples, so the colour fields are the ones at risk: they go
+        out as arrays and must come back as tuples with their values intact.
+        """
+        import json
+
+        from naive_timer.shard import ShardParams
+        from naive_timer.tuning import apply_json_dict, params_to_json
+
+        original = ShardParams()
+        original.glow = 1.75
+        original.sway_degrees = 123.0
+        original.font_bold = not original.font_bold
+        original.font_family = "Courier New"
+        original.nebula_color_a = (0.5, 0.25, 0.1)
+
+        restored = ShardParams()
+        apply_json_dict(restored, json.loads(params_to_json(original)))
+
+        self.assertEqual(restored, original)
+        self.assertIsInstance(restored.nebula_color_a, tuple)
+
+    def test_load_ignores_unknown_and_keeps_defaults_for_absent(self):
+        """A file from another build must load what it can, not crash.
+
+        Unknown keys are dropped; fields the file omits keep their current
+        value rather than reverting or erroring.
+        """
+        from naive_timer.shard import ShardParams
+        from naive_timer.tuning import apply_json_dict
+
+        params = ShardParams()
+        params.glow = 0.5
+        apply_json_dict(params, {"glow": 1.2, "no_such_field": 99})
+
+        self.assertEqual(params.glow, 1.2)
+        self.assertFalse(hasattr(params, "no_such_field"))
+        # A field absent from the dict is left alone.
+        self.assertEqual(params.spec_power, ShardParams().spec_power)
+
     def test_text_image_has_ink_where_the_numerals_are(self):
         from naive_timer.shard import ShardParams, render_text_image
 
