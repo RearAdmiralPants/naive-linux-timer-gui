@@ -216,6 +216,9 @@ class TuningPanel(QWidget):
             buttons.addWidget(button)
         outer.addLayout(buttons)
 
+        # Every control now exists, so a startup file can drive them all.
+        self._autoload()
+
     def _slider_group(self, title: str, specs) -> QGroupBox:
         box = QGroupBox(title)
         form = QFormLayout(box)
@@ -283,10 +286,39 @@ class TuningPanel(QWidget):
             QMessageBox.warning(self, "Load failed", str(exc))
             return
 
+        self._apply_loaded(data)
+
+    def _apply_loaded(self, data: dict) -> None:
+        """Fold a loaded dict into the params, then make it visible.
+
+        Shared by the Load button and startup auto-load: update params, pull the
+        widgets back into line, and repaint every shard.
+        """
         apply_json_dict(self._params, data)
         self._sync_widgets()
         for shard in self._shards:
             shard.refresh_params()
+
+    # The file auto-loaded from the working directory at startup, if present.
+    # Kept distinct from the Save/Load default (shard_params.json) so an
+    # experimental save doesn't silently become the next launch's defaults --
+    # you promote a look to the default by copying it to this name on purpose.
+    AUTOLOAD_NAME = "default-params.json"
+
+    def _autoload(self) -> None:
+        path = os.path.join(os.getcwd(), self.AUTOLOAD_NAME)
+        if not os.path.exists(path):
+            return
+        try:
+            with open(path) as fh:
+                data = json.load(fh)
+        except (OSError, ValueError) as exc:
+            # A broken dev file must not stop the app from starting; a console
+            # note is enough, and a modal on launch would just be in the way.
+            print(f"[tuning] ignoring {path}: {exc}")
+            return
+        self._apply_loaded(data)
+        print(f"[tuning] loaded startup params from {path}")
 
     def _sync_widgets(self) -> None:
         """Pull every control back into line with ``self._params``.
