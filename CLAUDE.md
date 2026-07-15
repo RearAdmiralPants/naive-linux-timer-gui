@@ -1,6 +1,6 @@
 # naive-linux-timer-gui
 
-A simple local visually-appealing stopwatch/timer to help me understand what kinds of accelerated 3D effects are available in a consumer Linux distribution and the difficulty in developing against stacks which bring those effects to the community of different consumer acceleration hardware (nVidia/CUDA; AMD/Vulkan; Intel/the-new-one - SYC-something?; Apple Siligon; Others?).
+A simple local visually-appealing stopwatch/timer to help me understand what kinds of accelerated 3D effects are available in a consumer Linux distribution these days.
 
 ## Features
 
@@ -12,13 +12,13 @@ When the time in the future / timespan is reached, an alarm sound is triggered, 
 
 Alternatively, the current time is displayed using the default visualization techniques until the application is closed.
 
-## Operational Details
-
-Package installation is permitted within reason (< 1GB); if a stack dependency/CLI utility is missing and would be convenient, surface it in the session, but any well-behaved, small dependency without cataclysmic installation/upgrade mechanics in light of other installed packages can generally be installed without the user's express permission.
-
 # User Details
 
 Paul, 45-year-old IT professional (3 decades' experience, mostly software architecture/development, with systems/network/security architecture/administration), professional dramatic tenor, married to husband AJ, together 20 years this September, I am over-honest, over-emotional, and over-verbose. Ask me anything, tell me anything.
+
+## Operational Details
+
+Package installation is permitted within reason (< 1GB); if a stack dependency/CLI utility is missing and would be convenient, surface it in the session, but any well-behaved, small dependency without cataclysmic installation/upgrade mechanics in light of other installed packages can generally be installed without the user's express permission.
 
 ## Working Process
 
