@@ -1,7 +1,10 @@
 # TODO
 
 - Optimizations
-	- Starfield onto cube / sphere?
+	- [x] Nebula baked into a 512^2 RG16F cubemap; stars stay procedural.
+	      4K 30ms -> 6.5ms. See docs/HANDOFF.md.
+	- Re-bake one cube face per frame to restore the nebula's drift?
+	- default-params.json only auto-loads under NAIVE_TIMER_TUNE=1 -- intended?
 	- Suggestions?
 
 - Prettier

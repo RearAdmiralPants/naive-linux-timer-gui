@@ -22,7 +22,7 @@ import math
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from PySide6.QtCore import QFileSystemWatcher, Qt
+from PySide6.QtCore import QFileSystemWatcher, QSize, Qt
 from PySide6.QtGui import (
     QColor,
     QFont,
@@ -33,6 +33,7 @@ from PySide6.QtGui import (
     QVector3D,
 )
 from PySide6.QtOpenGL import (
+    QOpenGLFramebufferObject,
     QOpenGLBuffer,
     QOpenGLShader,
     QOpenGLShaderProgram,
@@ -57,6 +58,34 @@ _GL_FRONT = 0x0404
 _GL_BACK = 0x0405
 _GL_FALSE = 0
 _GL_TRUE = 1
+_GL_FRAMEBUFFER = 0x8D40
+_GL_COLOR_ATTACHMENT0 = 0x8CE0
+_GL_TEXTURE_CUBE_MAP_POSITIVE_X = 0x8515  # the other five faces follow it
+_GL_TEXTURE_CUBE_MAP_SEAMLESS = 0x884F
+_GL_TEXTURE0 = 0x84C0
+
+# Cube face size for the baked nebula. The nebula is low-frequency by
+# construction -- a domain-warped fbm thresholded into wisps -- so it survives
+# this comfortably; the stars, which do not, are never baked. Six faces of
+# RG16F at this size is 3 MB.
+_NEBULA_CUBE_SIZE = 512
+
+# Camera bases for the six cube faces, as (forward, right, up).
+#
+# These are not arbitrary: they reproduce OpenGL's own cubemap face convention
+# (GL spec, the (ma, sc, tc) table), so that the direction this pass rasterises
+# into a texel is exactly the direction a runtime texture(cube, dir) lookup
+# resolves back to that texel. Get one axis sign wrong and the nebula comes
+# back mirrored across a face boundary. Rendered with a 90 degree FOV and
+# aspect 1, which is what makes the six frusta tile the sphere without overlap.
+_CUBE_FACE_BASES = (
+    ((1.0, 0.0, 0.0), (0.0, 0.0, -1.0), (0.0, -1.0, 0.0)),   # +X
+    ((-1.0, 0.0, 0.0), (0.0, 0.0, 1.0), (0.0, -1.0, 0.0)),   # -X
+    ((0.0, 1.0, 0.0), (1.0, 0.0, 0.0), (0.0, 0.0, 1.0)),     # +Y
+    ((0.0, -1.0, 0.0), (1.0, 0.0, 0.0), (0.0, 0.0, -1.0)),   # -Y
+    ((0.0, 0.0, 1.0), (1.0, 0.0, 0.0), (0.0, -1.0, 0.0)),    # +Z
+    ((0.0, 0.0, -1.0), (-1.0, 0.0, 0.0), (0.0, -1.0, 0.0)),  # -Z
+)
 
 # Texture the numerals are drawn into. Wide, because the readout is wide, and
 # oversized because the glyphs get magnified across the face of the shard.
@@ -199,6 +228,23 @@ class ShardParams:
     nebula_color_b: tuple = (0.42, 0.13, 0.34)
     star_density: float = 90.0
     star_brightness: float = 1.0
+
+
+def _sky_fragment_source(defines: tuple[str, ...] = ()) -> str:
+    """sky.frag with #defines injected straight after its #version line.
+
+    GLSL requires #version to come first, so the defines cannot simply be
+    prepended. Read fresh each call, which is what makes hot-reload work.
+    """
+    lines = (_SHADER_DIR / "sky.frag").read_text().splitlines(keepends=True)
+    for index, line in enumerate(lines):
+        if line.lstrip().startswith("#version"):
+            head = index + 1
+            break
+    else:
+        raise RuntimeError("sky.frag has no #version line")
+    injected = "".join(f"#define {name} 1\n" for name in defines)
+    return "".join(lines[:head]) + injected + "".join(lines[head:])
 
 
 def default_surface_format() -> QSurfaceFormat:
@@ -472,6 +518,7 @@ class ShardWidget(QOpenGLWidget):
         self._sky_program: QOpenGLShaderProgram | None = None
         self._sky_uniforms: dict[str, int] = {}
         self._sky_vao = QOpenGLVertexArrayObject()
+        self._nebula_cube: QOpenGLTexture | None = None
         self._elapsed = 0.0
         self._texture: QOpenGLTexture | None = None
         self._text_dirty = True
@@ -598,22 +645,32 @@ class ShardWidget(QOpenGLWidget):
         if location >= 0:
             self._program.setUniformValue(location, value)
 
-    def _load_sky_program(self) -> None:
-        """Compile the backdrop shaders. Keep the old program if this fails."""
+    def _build_sky_program(self, defines: tuple[str, ...] = ()) -> QOpenGLShaderProgram | None:
+        """Compile sky.{vert,frag}, optionally with preprocessor defines.
+
+        The bake pass and the runtime pass are the same file compiled twice, so
+        the noise cannot drift between what is baked and what would have been
+        drawn. Returns None on failure; the caller decides whether that is
+        fatal or merely a bad hot-reload.
+        """
         program = QOpenGLShaderProgram()
         ok = program.addShaderFromSourceFile(
             QOpenGLShader.Vertex, str(_SHADER_DIR / "sky.vert")
-        ) and program.addShaderFromSourceFile(
-            QOpenGLShader.Fragment, str(_SHADER_DIR / "sky.frag")
+        ) and program.addShaderFromSourceCode(
+            QOpenGLShader.Fragment, _sky_fragment_source(defines)
         )
-        if ok:
-            ok = program.link()
+        if ok and program.link():
+            return program
+        print(f"[sky] compile failed{list(defines)}:\n{program.log().strip()}")
+        return None
 
-        if not ok:
-            log = program.log().strip()
+    def _load_sky_program(self) -> None:
+        """Compile the backdrop shaders. Keep the old program if this fails."""
+        program = self._build_sky_program()
+        if program is None:
             if self._sky_program is None:
-                raise RuntimeError(f"initial sky shader compile failed:\n{log}")
-            print(f"[sky] shader reload failed, keeping previous:\n{log}")
+                raise RuntimeError("initial sky shader compile failed")
+            print("[sky] shader reload failed, keeping previous")
             return
 
         program.bind()
@@ -623,11 +680,99 @@ class ShardWidget(QOpenGLWidget):
                 "uTime", "uNebula", "uNebulaColorA", "uNebulaColorB",
                 "uStarDensity", "uStarBrightness",
                 "uCamRight", "uCamUp", "uCamForward", "uTanHalfFov", "uAspect",
+                "uNebulaCube",
             )
         }
+        # The cube lives on texture unit 1; unit 0 is the shard's text atlas.
+        loc = self._sky_uniforms.get("uNebulaCube", -1)
+        if loc >= 0:
+            program.setUniformValue1i(loc, 1)
         program.release()
         self._sky_program = program
         print("[sky] shaders reloaded")
+
+        # The shape the runtime pass samples comes from this same source, so a
+        # hot-reload that changes the noise must re-bake or the two disagree.
+        self._bake_nebula()
+
+    def _bake_nebula(self) -> None:
+        """Render the nebula's direction-only factors into a cubemap, once.
+
+        This is the whole optimisation: the domain-warped fbm stops being
+        per-pixel per-frame work and becomes a texture fetch. Six faces at 512
+        is 1.6 Mpx, about a sixth of a single 4K frame, so it is cheap enough
+        to redo on every shader reload rather than caching to disk.
+        """
+        fns = self.context().functions()
+        program = self._build_sky_program(("SKY_PROCEDURAL_NEBULA", "SKY_BAKE"))
+        if program is None:
+            print("[sky] nebula bake skipped; keeping previous cube")
+            return
+
+        if self._nebula_cube is None:
+            cube = QOpenGLTexture(QOpenGLTexture.TargetCubeMap)
+            cube.setFormat(QOpenGLTexture.RG16F)
+            cube.setSize(_NEBULA_CUBE_SIZE, _NEBULA_CUBE_SIZE)
+            # No mipmaps: nothing minifies a skybox far enough to need them,
+            # and generating them would only soften the wisps.
+            cube.setMipLevels(1)
+            cube.allocateStorage()
+            cube.setMinificationFilter(QOpenGLTexture.Linear)
+            cube.setMagnificationFilter(QOpenGLTexture.Linear)
+            cube.setWrapMode(QOpenGLTexture.ClampToEdge)
+            self._nebula_cube = cube
+
+        # Without this, bilinear taps at a face edge clamp instead of reaching
+        # into the neighbouring face, drawing a visible seam across the sky.
+        fns.glEnable(_GL_TEXTURE_CUBE_MAP_SEAMLESS)
+
+        # QOpenGLFramebufferObject owns the FBO name and frees it; PySide6's
+        # glGenFramebuffers wants an out-array, and this needs no cleanup path.
+        # Its own colour texture goes unused -- each face is attached over it.
+        scratch = QOpenGLFramebufferObject(
+            QSize(_NEBULA_CUBE_SIZE, _NEBULA_CUBE_SIZE)
+        )
+        scratch.bind()
+        fns.glViewport(0, 0, _NEBULA_CUBE_SIZE, _NEBULA_CUBE_SIZE)
+        fns.glDisable(_GL_DEPTH_TEST)
+        fns.glDisable(_GL_BLEND)
+
+        program.bind()
+        p = self.params
+        for name, value in (("uTanHalfFov", 1.0), ("uAspect", 1.0), ("uTime", 0.0)):
+            loc = program.uniformLocation(name)
+            if loc >= 0:
+                program.setUniformValue1f(loc, float(value))
+        self._sky_vao.bind()
+
+        for index, (forward, right, up) in enumerate(_CUBE_FACE_BASES):
+            for name, vec in (
+                ("uCamForward", forward), ("uCamRight", right), ("uCamUp", up)
+            ):
+                loc = program.uniformLocation(name)
+                if loc >= 0:
+                    program.setUniformValue(loc, QVector3D(*vec))
+            fns.glFramebufferTexture2D(
+                _GL_FRAMEBUFFER,
+                _GL_COLOR_ATTACHMENT0,
+                _GL_TEXTURE_CUBE_MAP_POSITIVE_X + index,
+                self._nebula_cube.textureId(),
+                0,
+            )
+            fns.glDrawArrays(_GL_TRIANGLES, 0, 3)
+
+        self._sky_vao.release()
+        program.release()
+
+        # scratch.release() would bind FBO 0; a QOpenGLWidget draws into its own.
+        fns.glBindFramebuffer(_GL_FRAMEBUFFER, self.defaultFramebufferObject())
+        # Qt sizes the viewport in device pixels, not logical ones; restoring
+        # with self.width() would shrink the scene on a HiDPI screen.
+        ratio = self.devicePixelRatio()
+        fns.glViewport(0, 0, int(self.width() * ratio), int(self.height() * ratio))
+        fns.glEnable(_GL_DEPTH_TEST)
+        fns.glEnable(_GL_BLEND)
+        print(f"[sky] nebula baked into {_NEBULA_CUBE_SIZE}^2 cubemap")
 
     def camera(self) -> tuple:
         """Where the camera is and which way it faces, right now.
@@ -697,10 +842,20 @@ class ShardWidget(QOpenGLWidget):
             if loc >= 0:
                 program.setUniformValue(loc, value)
 
+        if self._nebula_cube is not None:
+            self._nebula_cube.bind(1)
+
         self._sky_vao.bind()
         fns.glDrawArrays(_GL_TRIANGLES, 0, 3)
         self._sky_vao.release()
         program.release()
+
+        if self._nebula_cube is not None:
+            self._nebula_cube.release(1)
+            # The shard pass samples its text atlas from unit 0 and never
+            # re-selects the unit, so leaving unit 1 active would send its
+            # binding to the wrong place.
+            fns.glActiveTexture(_GL_TEXTURE0)
 
         fns.glDepthMask(_GL_TRUE)
         fns.glEnable(_GL_DEPTH_TEST)

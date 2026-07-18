@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import sys
 
-from PySide6.QtCore import Qt, QTimer, QUrl
+from PySide6.QtCore import Qt, QElapsedTimer, QTimer, QUrl
 from PySide6.QtGui import QSurfaceFormat
 from PySide6.QtWidgets import (
     QApplication,
@@ -32,6 +32,32 @@ from . import sound, tuning
 
 # ~60 FPS refresh for smooth animation.
 FRAME_MS = 16
+
+# Longest step we will hand the animation in one frame. A stall, a drag of the
+# window, or a laptop resume can leave an arbitrarily large gap; without a clamp
+# the camera would teleport rather than sway.
+MAX_FRAME_S = 0.25
+
+
+class FrameClock:
+    """Real elapsed time between frames.
+
+    The animation used to advance by a fixed FRAME_MS regardless of how long
+    the frame actually took, so on a GPU that could not hold 60 FPS the sway,
+    twinkle and drift all ran in slow motion -- at 27 ms/frame, 60% speed. The
+    displayed time was always correct (that comes from the models, which read
+    the wall clock); it was the animation that lagged. Measuring the interval
+    makes animation speed the same on every machine.
+    """
+
+    def __init__(self) -> None:
+        self._timer = QElapsedTimer()
+        self._timer.start()
+
+    def tick(self) -> float:
+        """Seconds since the previous call, clamped."""
+        return min(self._timer.restart() / 1000.0, MAX_FRAME_S)
+
 
 # QtMultimedia is optional; if unavailable we degrade to a visual-only alert.
 try:
@@ -61,6 +87,7 @@ class StopwatchWidget(QWidget):
         layout.addWidget(self._shard, stretch=1)
         layout.addLayout(buttons)
 
+        self._clock = FrameClock()
         timer = QTimer(self)
         timer.timeout.connect(self._tick)
         timer.start(FRAME_MS)
@@ -77,7 +104,7 @@ class StopwatchWidget(QWidget):
 
     def _tick(self) -> None:
         self._shard.set_text(format_elapsed(self._sw.elapsed()))
-        self._shard.advance(FRAME_MS / 1000.0)
+        self._shard.advance(self._clock.tick())
 
 
 class TimerWidget(QWidget):
@@ -123,6 +150,7 @@ class TimerWidget(QWidget):
         layout.addWidget(self._status)
         layout.addLayout(buttons)
 
+        self._clock = FrameClock()
         timer = QTimer(self)
         timer.timeout.connect(self._tick)
         timer.start(FRAME_MS)
@@ -180,7 +208,7 @@ class TimerWidget(QWidget):
 
     def _tick(self) -> None:
         self._shard.set_text(format_elapsed(self._cd.remaining()))
-        self._shard.advance(FRAME_MS / 1000.0)
+        self._shard.advance(self._clock.tick())
 
         # The alert is carried entirely by the shard: it fractures, then
         # breathes dark red. No background flash -- that read as jarring.

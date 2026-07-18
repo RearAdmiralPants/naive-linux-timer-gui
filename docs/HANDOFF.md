@@ -423,11 +423,96 @@ The budget is 16 ms (`FRAME_MS` in `app.py`), so the iGPU misses it by 3.6x.
 
 Note the scaling: 4x the pixels costs the Intel 4.03x the time. `sky.frag` is
 cleanly fill-rate bound, which means **resolution is the whole story** and a
-faster GPU only buys headroom against an extravagant per-pixel cost — two
-5-octave 3D fbm calls plus three star layers, recomputed from scratch every
-frame for a backdrop that changes glacially. Baking the sky into a cubemap and
-refreshing a face at a time would fix this on *every* GPU. Until that happens,
-a machine without a strong discrete GPU will not hold 60 FPS at 4K.
+faster GPU only buys headroom against an extravagant per-pixel cost.
+
+### The nebula is baked into a cubemap (this is now done)
+
+`tools/bench_sky.py` compiles `sky.frag` several ways and times each, so the
+frame can be attributed rather than guessed. Measured on a **TigerLake GT2
+(Iris Xe)** — note that is *not* the GT1 in the table above, which is roughly
+half the part; conflicting historical numbers here are two different machines,
+one 1920x1080 and one 3840x2400.
+
+| | 420x620 | 1920x1080 | 3840x2400 |
+| --- | --- | --- | --- |
+| before (all procedural) | 0.63 ms | 4.4–6.7 ms | 27–30 ms |
+| **after (nebula baked)** | — | **1.2 ms** | **6.5 ms** |
+| stars alone | 0.18 | 1.2 | 7.8 |
+| fill-rate floor | 0.06 | 0.2 | 1.2 |
+
+**The nebula was 78–98% of the frame; the stars are 14–26%.** That split held
+at every resolution and on both GPUs, and it is what decided the design:
+
+- **Bake the nebula.** Low-frequency, blurry, expensive — exactly what a
+  texture is good at. Filtering artefacts are invisible on a domain-warped fbm.
+- **Keep the stars procedural.** Sub-pixel bright points are exactly what a
+  texture is *worst* at: bilinear smears the cores, mips erase them, and camera
+  sway makes them shimmer and pop between texels. They are also cheap. Baking
+  them would have cost the crispness and the per-star twinkle to save ~20%.
+
+Reducing fbm octaves was tried first and rejected — 5→3 only reached 16.6 ms at
+4K, still over budget, and 2 octaves (10.7 ms) stops producing filaments.
+
+**What the cube stores** (`nebulaFactors()` in `sky.frag`): two direction-only
+scalars, RG16F, 512² per face, 3 MB total. `.x` is cloud thickness before
+`uNebula` scales it; `.y` is the position between the two lobe colours.
+Everything colour-dependent stays a live uniform, so **`nebula`,
+`nebula_color_a` and `nebula_color_b` still respond to the tuning sliders with
+no re-bake** — only a shader edit triggers one.
+
+`_bake_nebula()` in `shard.py` renders the six faces with
+`SKY_PROCEDURAL_NEBULA + SKY_BAKE` defined, using `_CUBE_FACE_BASES`, which
+reproduces the GL spec's own `(ma, sc, tc)` face convention. Get one axis sign
+wrong and the sky comes back mirrored across a face boundary; verified by
+rendering the same view both ways, max deviation **1/255** including a corner
+view spanning three faces and a pole view. `GL_TEXTURE_CUBE_MAP_SEAMLESS` is
+enabled, without which bilinear taps clamp at face edges and draw seams.
+
+Cost of a bake: 6 × 512² = 1.6 Mpx, about one-sixth of a single 4K frame — so
+it is redone on every shader hot-reload rather than cached to disk.
+
+**What was given up:** the nebula's drift (0.004 units/s) is gone; a snapshot
+cannot drift. If it is ever missed, re-bake one face per frame on a rolling
+basis for 1/6 the cost. Star twinkle is untouched.
+
+Do not read `full` from the bench as the shipped number any more — that variant
+is the *pre-bake* shader, kept so the saving stays measurable. `baked` is what
+ships. The bench also loads `default-params.json` (`star_density=178`) rather
+than `ShardParams` defaults (`90`), so its star cost is the pessimistic one.
+
+**Thermal noise is worse than previously documented.** The same 5-octave shader
+at 4K measured 21.8, 26.4 and 62.0 ms in one session depending on how
+heat-soaked the iGPU was. That is a 3x spread, not sampling jitter. Insert
+cooldowns between 4K runs. The 58.3 ms figure above may itself be heat-soaked.
+
+**The T500 is only ~1.3x the Iris Xe** (3.5 vs 4.5 ms at 1080p). Once PRIME's
+per-frame copy-back is counted, offloading to it on that machine is plausibly a
+net loss. `gpu-select.sh` should not assume discrete is faster.
+
+### Animation runs on real elapsed time, not a fixed step
+
+`_tick()` used to call `advance(FRAME_MS / 1000.0)` — a constant 16 ms —
+regardless of how long the frame actually took. On a GPU that could not hold
+60 FPS the camera sway, star twinkle and nebula drift therefore ran in slow
+motion: at 27 ms/frame, 60% speed. The *displayed time* was always correct
+(that comes from the models, which read the wall clock), which is why this went
+unnoticed for so long; it was only the animation that lagged. It also meant any
+`sway_degrees` or `orbit_speed` value tuned on a fast machine felt different on
+a slow one.
+
+`FrameClock` in `app.py` now measures the real interval with `QElapsedTimer`,
+clamped to `MAX_FRAME_S = 0.25` so a stall or a laptop resume makes the camera
+sway rather than teleport.
+
+### Known: `default-params.json` does not apply to a normal launch
+
+`_autoload()` is a method of the tuning panel (`tuning.py:220`), and the panel
+is only constructed under `NAIVE_TIMER_TUNE=1`. So the promoted look — red
+numerals, `star_density=178`, the tuned nebula — is what you get in tune mode,
+and a plain `python -m naive_timer` still renders `ShardParams` defaults. That
+is probably not the intent of "auto-load default-params.json"; left alone here
+because fixing it changes the app's appearance, which is a decision, not a bug
+fix.
 
 Without a display **and** without `xvfb-run`, the GL tier of the smoke test
 skips itself: Qt's `offscreen` platform has no OpenGL, and constructing a

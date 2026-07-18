@@ -23,6 +23,9 @@ uniform float uAspect;
 
 uniform float uTime;
 
+// The baked nebula. Unused when SKY_PROCEDURAL_NEBULA is defined.
+uniform samplerCube uNebulaCube;
+
 uniform float uNebula;        // 0 = empty space, 1 = thick cloud
 uniform vec3 uNebulaColorA;   // the cool lobe
 uniform vec3 uNebulaColorB;   // the warm lobe
@@ -67,15 +70,53 @@ float noise3(vec3 p) {
     );
 }
 
+// Octave count. Overridable at compile time so tools/bench_sky.py can price
+// each octave; the app always gets 5.
+#ifndef SKY_FBM_OCTAVES
+#define SKY_FBM_OCTAVES 5
+#endif
+
 float fbm3(vec3 p) {
     float sum = 0.0;
     float amp = 0.5;
-    for (int i = 0; i < 5; i++) {
+    for (int i = 0; i < SKY_FBM_OCTAVES; i++) {
         sum += amp * noise3(p);
         p *= 2.03;                         // not exactly 2: avoids axis banding
         amp *= 0.5;
     }
     return sum;
+}
+
+// The nebula, reduced to two scalars that depend only on direction:
+//
+//    .x  how thick the cloud is here, before uNebula scales it
+//    .y  where between the cool and warm lobes its colour sits
+//
+// Everything colour-dependent stays outside, so uNebula and the two lobe
+// colours remain live uniforms -- dragging those sliders needs no re-bake.
+// Only the shape is baked, and the shape is what costs 80-95% of the frame.
+//
+// Defining SKY_PROCEDURAL_NEBULA evaluates the noise directly instead. That is
+// the pre-bake path: the bake itself compiles with it, and tools/bench_sky.py
+// uses it to price what the bake saves.
+vec2 nebulaFactors(vec3 dir) {
+#ifdef SKY_PROCEDURAL_NEBULA
+    // A second fbm displaces the first (domain warping), which is what turns
+    // round blobs into filaments and wisps. The slow drift is the clouds
+    // themselves moving, not the camera.
+    //
+    // uTime is deliberately absent once baked: a snapshot cannot drift. The
+    // drift was 0.004 units/s, so this costs little that the eye can follow.
+    vec3 drift = vec3(uTime * 0.004, uTime * 0.0015, uTime * 0.002);
+    float base = fbm3(dir * 2.3 + drift);
+    float warped = fbm3(dir * 3.1 + base * 1.6 - drift);
+
+    // 3D fbm covers far more of the frame than the 2D version did, so the
+    // threshold has to climb or the nebula becomes a wash rather than wisps.
+    return vec2(smoothstep(0.40, 0.88, warped), smoothstep(0.25, 0.75, base));
+#else
+    return texture(uNebulaCube, dir).rg;
+#endif
 }
 
 // One layer of stars on the celestial sphere. Direction space is diced into
@@ -109,20 +150,28 @@ void main() {
         + uCamUp * (ndc.y * uTanHalfFov)
     );
 
+#ifdef SKY_BAKE
+    // Baking a cube face: write the two direction-only factors and stop. The
+    // camera basis uniforms are the face's axes, at a 90 degree FOV, so this
+    // pass walks exactly the directions the runtime lookup will ask for.
+    FragColor = vec4(nebulaFactors(dir), 0.0, 1.0);
+    return;
+#endif
+
     vec3 color = VOID_COLOR;
 
-    // Nebula. A second fbm displaces the first (domain warping), which is what
-    // turns round blobs into filaments and wisps. The slow drift is the clouds
-    // themselves moving, not the camera.
-    vec3 drift = vec3(uTime * 0.004, uTime * 0.0015, uTime * 0.002);
-    float base = fbm3(dir * 2.3 + drift);
-    float warped = fbm3(dir * 3.1 + base * 1.6 - drift);
+    // SKY_SKIP_NEBULA / SKY_SKIP_STARS are never defined by the app. They exist
+    // so tools/bench_sky.py can compile half-shaders and attribute the frame
+    // cost to the nebula or the stars separately.
+    float density = 0.0;
+    vec3 cloud = vec3(0.0);
 
-    // 3D fbm covers far more of the frame than the 2D version did, so the
-    // threshold has to climb or the nebula becomes a wash rather than wisps.
-    float density = smoothstep(0.40, 0.88, warped) * uNebula;
-    vec3 cloud = mix(uNebulaColorA, uNebulaColorB, smoothstep(0.25, 0.75, base));
+#ifndef SKY_SKIP_NEBULA
+    vec2 neb = nebulaFactors(dir);
+    density = neb.x * uNebula;
+    cloud = mix(uNebulaColorA, uNebulaColorB, neb.y);
     color += cloud * density;
+#endif
 
     // Three star layers at different scales read as depth.
     //
@@ -131,9 +180,11 @@ void main() {
     // and flickers out of existence; these keep the core a couple of pixels
     // across at the default density.
     float stars = 0.0;
+#ifndef SKY_SKIP_STARS
     stars += starLayer(dir, uStarDensity * 0.6, 0.170, 0.0) * 1.00;
     stars += starLayer(dir, uStarDensity * 1.3, 0.130, 17.0) * 0.65;
     stars += starLayer(dir, uStarDensity * 2.4, 0.095, 41.0) * 0.40;
+#endif
     color += vec3(stars) * uStarBrightness;
 
     // The nebula sits in front of the faintest stars, as dust does.
