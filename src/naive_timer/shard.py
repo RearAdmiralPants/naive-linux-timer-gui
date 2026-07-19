@@ -139,9 +139,30 @@ _CENTER = (0.0, 0.0, -_THICKNESS / 2.0)
 # pos(3) normal(3) uv(2) pieceCenter(3) pieceVel(3) pieceAxis(3) cap(1)
 _FLOATS_PER_VERTEX = 18
 
-# Triangles per wedge: 1 front face + 2 front bevel + 2 wall + 2 back bevel
-# + 1 back face + 8 radial caps (4 per cut plane).
-_TRIS_PER_WEDGE = 16
+# Front-face subdivision. Level n splits each wedge's front triangle into a fan
+# of n**2... see _tris_per_wedge below. Level 0 is exactly the original single
+# triangle per wedge, so the slider's origin is a true no-op.
+#
+# The ceiling is set by where the silhouette stops visibly improving, NOT by
+# frame rate: this app is fragment-bound (nebula cubemap, glass refraction), so
+# even level 5 -- ~6k front triangles -- costs no measurable frame time. A
+# slider whose useful range is the first 0.5% of its travel is a bad slider.
+_FRONT_SUBDIV_MAX = 5
+
+
+def _rings(subdiv: int) -> int:
+    """Radial rings between the apex and the inset ring. Level 0 -> 1 ring."""
+    return 1 << max(0, min(_FRONT_SUBDIV_MAX, int(subdiv)))
+
+
+def _tris_per_wedge(subdiv: int) -> int:
+    """Triangles one wedge contributes, at a given front subdivision.
+
+    n**2 front patch + (n+1) front bevel + 2 wall + 2 back bevel + 1 back face
+    + 2*(n+3) radial caps.  n=1 gives 16, the original hand-counted total.
+    """
+    n = _rings(subdiv)
+    return n * n + 3 * n + 12
 
 # Vertical field of view, degrees. Shared by the projection and by the sky's
 # per-pixel ray reconstruction -- they must agree or the backdrop will not line
@@ -202,6 +223,15 @@ class ShardParams:
     light_color: tuple = (1.00, 1.00, 1.00)
     font_family: str = "monospace"
     font_bold: bool = True
+
+    # Front-face curvature. Unlike everything above, these two rebuild the
+    # vertex buffer rather than setting a uniform -- see _geometry_dirty.
+    # front_subdiv is an integer level 0..5 (triangle count), front_bulge is
+    # how far the cap swells from flat toward the tangent-continuous dome.
+    # They are deliberately independent: a smooth shallow curve and a coarse
+    # steep one are both things you might want to look at.
+    front_subdiv: float = 3.0
+    front_bulge: float = 0.65
 
     # Camera. It sways back and forth across the front of the shard, always
     # looking at it -- rather than orbiting all the way round, which would
@@ -319,6 +349,241 @@ def _add_triangle(data: array.array, tri, uvs, body, cap: float = 0.0) -> None:
         )
 
 
+def _add_triangle_smooth(data, tri, uvs, normals, body, cap: float = 0.0) -> None:
+    """Append one triangle carrying *per-vertex* normals.
+
+    The curved front face is the one surface where flat shading defeats the
+    purpose: subdivide it into thousands of facets with a normal each and the
+    silhouette smooths while the specular highlight stays visibly faceted --
+    you have simply traded six big facets for six thousand small ones.
+
+    Winding still has to obey the same contract as _add_triangle, because
+    paintGL culls by orientation to order the two transparency passes. The cap
+    is convex and faces the camera, so "outward" here is unambiguously +z.
+    """
+    ux, uy, uz = (tri[1][j] - tri[0][j] for j in range(3))
+    vx, vy, vz = (tri[2][j] - tri[0][j] for j in range(3))
+    if ux * vy - uy * vx < 0.0:  # geometric normal points -z: wound backwards
+        tri = [tri[0], tri[2], tri[1]]
+        uvs = [uvs[0], uvs[2], uvs[1]]
+        normals = [normals[0], normals[2], normals[1]]
+
+    centre, velocity, axis = body
+    for (px, py, pz), (u, v), normal in zip(tri, uvs, normals):
+        data.extend(
+            (px, py, pz, *normal, u, v, *centre, *velocity, *axis, cap)
+        )
+
+
+def _dome_apex_z() -> float:
+    """Apex height of the fully tangent-continuous dome (bulge = 1).
+
+    For one radial direction, the arc that meets the inset ring at the bevel's
+    own slope is a circle centred on the axis: with s the bevel's steepness
+    (dz/dr, outward and negative) and r the inset radius,
+
+        rho**2 = r**2 * (1 + 1/s**2)     z_centre = _BEVEL_Z - r/s
+
+    The outline is irregular, so every direction yields a slightly different
+    apex height (they span about 5%). The surface can only have one apex, so
+    take the mean and let the cubic in _front_profile_z absorb the residual --
+    which is why the profile is a cubic and not literally a circle. A circle
+    has two free parameters and four constraints here; a cubic has four.
+    """
+    total = 0.0
+    for x, y in _OUTLINE:
+        radius = math.hypot(x, y)
+        inset_r = radius * _BEVEL_INSET
+        steepness = _BEVEL_Z / (radius * (1.0 - _BEVEL_INSET))
+        rho = inset_r * math.sqrt(1.0 + 1.0 / (steepness * steepness))
+        total += (_BEVEL_Z - inset_r / steepness) + rho
+    return total / len(_OUTLINE)
+
+
+_DOME_APEX_Z = _dome_apex_z()
+
+
+def _front_profile_z(u: float, inset_r: float, steepness: float, bulge: float):
+    """Height of the front surface at radial parameter ``u``.
+
+    ``u`` runs 0 at the apex to 1 at the inset ring, along one radial
+    direction. ``bulge`` blends between the original flat triangle (0) and the
+    tangent-continuous dome (1); because both profiles pin the same value at
+    the ring, the blend stays exactly on the ring at every bulge, and the
+    slope there is a blend of the two slopes -- so the crease closes smoothly
+    rather than only at bulge = 1.
+    """
+    flat = _PEAK_Z + u * (_BEVEL_Z - _PEAK_Z)
+    if bulge <= 0.0:
+        return flat
+
+    # Cubic Hermite: value/tangent at the apex (u=0) and at the ring (u=1).
+    # Apex tangent is 0 -- a nonzero one would put a cone point back at the
+    # centre, which is the very artefact we are removing.
+    uu = u * u
+    uuu = uu * u
+    h00 = 2.0 * uuu - 3.0 * uu + 1.0
+    h01 = -2.0 * uuu + 3.0 * uu
+    h11 = uuu - uu
+    # dz/du at the ring = dz/dr * dr/du = -steepness * inset_r.
+    curved = h00 * _DOME_APEX_Z + h01 * _BEVEL_Z + h11 * (-steepness * inset_r)
+    return flat + bulge * (curved - flat)
+
+
+def _front_patch(inset_a, inset_b, rim_a, rim_b, subdiv: int, bulge: float):
+    """Ring-subdivided front cap for one wedge.
+
+    ``rings[j]`` holds j+1 points, ring 0 being the shared apex and ring n the
+    chain along the inset edge. The two radial chains ``rings[j][0]`` and
+    ``rings[j][j]`` are the wedge's cut boundaries; the radial cut faces must
+    reuse them vertex-for-vertex or the solid opens up along every cut.
+    """
+    n = _rings(subdiv)
+    rings, normals = [], {}
+    for j in range(n + 1):
+        u = j / n
+        row = []
+        for k in range(j + 1):
+            t = k / j if j else 0.0
+            point, normal = _cap_point_and_normal(
+                u, t, inset_a, inset_b, rim_a, rim_b, bulge
+            )
+            row.append(point)
+            normals[_normal_key(point)] = normal
+        rings.append(row)
+    return rings, normals
+
+
+def _normal_key(point) -> tuple:
+    """Quantised position, so the same point reached from two wedges matches."""
+    return tuple(round(c, 5) for c in point)
+
+
+def _mean_facet_normal(triangles) -> tuple:
+    """Area-weighted mean normal of a group of facets, oriented outward (+z).
+
+    The weight is the cross product's own length, left un-normalised, so wide
+    facets count for more than slivers.
+    """
+    sx = sy = sz = 0.0
+    for (ax, ay, az), (bx, by, bz), (cx, cy, cz) in triangles:
+        ux, uy, uz = bx - ax, by - ay, bz - az
+        vx, vy, vz = cx - ax, cy - ay, cz - az
+        nx = uy * vz - uz * vy
+        ny = uz * vx - ux * vz
+        nz = ux * vy - uy * vx
+        if nz < 0.0:
+            nx, ny, nz = -nx, -ny, -nz
+        sx, sy, sz = sx + nx, sy + ny, sz + nz
+    length = math.sqrt(sx * sx + sy * sy + sz * sz) or 1.0
+    return (sx / length, sy / length, sz / length)
+
+
+def _profile_dz_du(u, inset_r, steepness, bulge):
+    """d/du of _front_profile_z. Analytic, because a difference here shows."""
+    flat = _BEVEL_Z - _PEAK_Z
+    if bulge <= 0.0:
+        return flat
+    curved = (
+        (6.0 * u * u - 6.0 * u) * _DOME_APEX_Z
+        + (-6.0 * u * u + 6.0 * u) * _BEVEL_Z
+        + (3.0 * u * u - 2.0 * u) * (-steepness * inset_r)
+    )
+    return flat + bulge * (curved - flat)
+
+
+def _cap_point_and_normal(u, t, inset_a, inset_b, rim_a, rim_b, bulge):
+    """Surface point and its exact normal at parameters (u, t).
+
+    Normals are analytic rather than averaged from the facets. Facet averaging
+    was the first implementation and it beaded the specular highlight: ring
+    subdivision alternates upward- and downward-pointing triangles, so the
+    accumulated normals zigzag from slot to slot, and above subdivision 3 that
+    ripple beats against the specular lobe and breaks the highlight into a
+    dashed line. The artefact scaled with triangle count -- the opposite of
+    what a smoothing slider is supposed to do. The surface is parametric and
+    its derivatives are known, so there is no reason to estimate them.
+    """
+    bx = inset_a[0] + t * (inset_b[0] - inset_a[0])
+    by = inset_a[1] + t * (inset_b[1] - inset_a[1])
+
+    def profile(tt):
+        rx = rim_a[0] + tt * (rim_b[0] - rim_a[0])
+        ry = rim_a[1] + tt * (rim_b[1] - rim_a[1])
+        radius = math.hypot(rx, ry)
+        return radius * _BEVEL_INSET, _BEVEL_Z / (radius * (1.0 - _BEVEL_INSET))
+
+    inset_r, steepness = profile(t)
+    z = _front_profile_z(u, inset_r, steepness, bulge)
+    point = (bx * u, by * u, z)
+
+    # The apex is a pole: dP/dt vanishes there and the cross product is
+    # undefined. Its normal is +z by construction -- the profile's apex
+    # tangent is horizontal, which is exactly what removes the cone point.
+    if u <= 0.0:
+        return point, (0.0, 0.0, 1.0)
+
+    # dP/du along the radius.
+    du = (bx, by, _profile_dz_du(u, inset_r, steepness, bulge))
+    # dP/dt around the ring. z varies with t only through the outline's local
+    # radius; a central difference on that is exact to rounding and far
+    # clearer than differentiating hypot through the lerp.
+    h = 1e-4
+    lo_r, lo_s = profile(t - h)
+    hi_r, hi_s = profile(t + h)
+    dz_dt = (
+        _front_profile_z(u, hi_r, hi_s, bulge)
+        - _front_profile_z(u, lo_r, lo_s, bulge)
+    ) / (2.0 * h)
+    dt = (
+        u * (inset_b[0] - inset_a[0]),
+        u * (inset_b[1] - inset_a[1]),
+        dz_dt,
+    )
+
+    nx = du[1] * dt[2] - du[2] * dt[1]
+    ny = du[2] * dt[0] - du[0] * dt[2]
+    nz = du[0] * dt[1] - du[1] * dt[0]
+    if nz < 0.0:
+        nx, ny, nz = -nx, -ny, -nz
+    length = math.sqrt(nx * nx + ny * ny + nz * nz) or 1.0
+    return point, (nx / length, ny / length, nz / length)
+
+
+def _accumulate_patch_normals(normals_by_slot, accum: dict) -> None:
+    """Fold one wedge's analytic normals into a *shared* vertex accumulator.
+
+    Shared across wedges on purpose, and this is the only averaging that
+    happens: within a wedge each position occurs once, so the analytic normal
+    survives untouched. Only the two radial seams (shared by two wedges) and
+    the apex (shared by all six) get averaged.
+
+    That seam averaging is the point. The outline is a polygon, so the surface
+    genuinely has an angular crease along every cut line; left alone it reads
+    as six smooth petals with six seams rather than one continuous dome.
+    """
+    for key, normal in normals_by_slot.items():
+        px, py, pz = accum.get(key, (0.0, 0.0, 0.0))
+        accum[key] = (px + normal[0], py + normal[1], pz + normal[2])
+
+
+def _resolve_normals(accum: dict) -> dict:
+    resolved = {}
+    for key, (nx, ny, nz) in accum.items():
+        length = math.sqrt(nx * nx + ny * ny + nz * nz) or 1.0
+        resolved[key] = (nx / length, ny / length, nz / length)
+    return resolved
+
+
+def _patch_triangles(rings):
+    """Index triples ``(ring, slot)`` tiling the cap, apex ring outward."""
+    for j in range(len(rings) - 1):
+        for k in range(j + 1):
+            yield ((j, k), (j + 1, k), (j + 1, k + 1))
+        for k in range(j):
+            yield ((j, k), (j + 1, k + 1), (j, k + 1))
+
+
 def _hash01(i: int, salt: int) -> float:
     """Deterministic pseudo-random in [0, 1).
 
@@ -366,7 +631,7 @@ def _wedge_rigid_body(i: int, corners) -> tuple:
     return centre, velocity, axis
 
 
-def _build_geometry() -> array.array:
+def _build_geometry(subdiv: int = 0, bulge: float = 0.0) -> array.array:
     """Extrude the outline into a solid, one wedge per edge.
 
     Each wedge contributes a front face, a front bevel, a side wall, a back
@@ -374,17 +639,42 @@ def _build_geometry() -> array.array:
     makes a wedge a real chunk: the whole solid piece tumbles together, rather
     than the front skin peeling off its own side wall.
 
+    ``subdiv`` and ``bulge`` curve the front face. Defaults reproduce the
+    original six flat triangles byte for byte.
+
     Interleaved per vertex:
         pos(3) normal(3) uv(2) pieceCenter(3) pieceVel(3) pieceAxis(3) = 17
     """
     data = array.array("f")
-    front_apex = (0.0, 0.0, _PEAK_Z)
+    apex_z = _front_profile_z(0.0, 0.0, 0.0, bulge)
+    front_apex = (0.0, 0.0, apex_z)
     back_apex = (0.0, 0.0, -_THICKNESS - _BACK_PEAK_Z)
     n = len(_OUTLINE)
+
+    # Front caps first, in their own pass: the vertex normals are averaged
+    # across wedge boundaries, so no wedge can be emitted until every wedge's
+    # facets have been accumulated.
+    patches = []
+    accum: dict = {}
+    for i in range(n):
+        ax, ay = _OUTLINE[i]
+        bx, by = _OUTLINE[(i + 1) % n]
+        rings, slot_normals = _front_patch(
+            (ax * _BEVEL_INSET, ay * _BEVEL_INSET, _BEVEL_Z),
+            (bx * _BEVEL_INSET, by * _BEVEL_INSET, _BEVEL_Z),
+            (ax, ay, 0.0),
+            (bx, by, 0.0),
+            subdiv,
+            bulge,
+        )
+        _accumulate_patch_normals(slot_normals, accum)
+        patches.append(rings)
+    cap_normals = _resolve_normals(accum)
 
     for i in range(n):
         ax, ay = _OUTLINE[i]
         bx, by = _OUTLINE[(i + 1) % n]
+        rings = patches[i]
 
         rim_a = (ax, ay, 0.0)
         rim_b = (bx, by, 0.0)
@@ -412,27 +702,52 @@ def _build_geometry() -> array.array:
             ],
         )
 
-        uv_apex = _face_uv(0.0, 0.0)
-        uv_inset_a = _face_uv(inset_a[0], inset_a[1])
-        uv_inset_b = _face_uv(inset_b[0], inset_b[1])
         uv_rim_a = _face_uv(ax, ay)
         uv_rim_b = _face_uv(bx, by)
         blank = [_NO_TEXT_UV] * 3
 
-        # Front face: carries the numerals.
-        _add_triangle(
-            data, [front_apex, inset_a, inset_b],
-            [uv_apex, uv_inset_a, uv_inset_b], piece,
-        )
-        # Front bevel: the chamfer that catches the edge highlight.
-        _add_triangle(
-            data, [inset_a, rim_a, rim_b],
-            [uv_inset_a, uv_rim_a, uv_rim_b], piece,
-        )
-        _add_triangle(
-            data, [inset_a, rim_b, inset_b],
-            [uv_inset_a, uv_rim_b, uv_inset_b], piece,
-        )
+        # Front face: carries the numerals. _face_uv is a planar projection, so
+        # every subdivided vertex gets its text coordinate for free and the
+        # numerals map identically however far the cap is curved -- the etching
+        # needed no changes at all.
+        for tri in _patch_triangles(rings):
+            points = [rings[j][k] for j, k in tri]
+            _add_triangle_smooth(
+                data,
+                points,
+                [_face_uv(p[0], p[1]) for p in points],
+                [cap_normals[_normal_key(p)] for p in points],
+                piece,
+            )
+
+        # Front bevel: the chamfer that catches the edge highlight. Its inset
+        # edge is shared with the cap, so it has to follow the cap's
+        # subdivision of that edge -- otherwise the T-junctions leave the
+        # wedge an open shell and it reads as hollow when it tumbles.
+        chain = rings[-1]
+        strip = [
+            ([rim_a, chain[k], chain[k + 1]],
+             [uv_rim_a, _face_uv(*chain[k][:2]), _face_uv(*chain[k + 1][:2])])
+            for k in range(len(chain) - 1)
+        ]
+        strip.append((
+            [rim_a, chain[-1], rim_b],
+            [uv_rim_a, _face_uv(*chain[-1][:2]), uv_rim_b],
+        ))
+        # One normal for the whole chamfer, not one per sliver.
+        #
+        # The strip is a fan from rim_a, so at subdivision 5 it is 33 long thin
+        # triangles across a band only ~0.1 units wide. Flat-shading each of
+        # them independently banded the chamfer, and a specular highlight
+        # crossing the band broke into a dashed line whose dash count tracked
+        # the subdivision level -- a smoothing slider that visibly got worse
+        # the further you pushed it. The chamfer is one facet conceptually, so
+        # it gets one normal: the area-weighted mean of the strip.
+        bevel_normal = _mean_facet_normal(tri for tri, _ in strip)
+        for tri, uvs in strip:
+            _add_triangle_smooth(
+                data, tri, uvs, [bevel_normal] * 3, piece
+            )
         # Side wall: the thickness you can actually see.
         _add_triangle(data, [rim_a, back_rim_a, back_rim_b], blank, piece)
         _add_triangle(data, [rim_a, back_rim_b, rim_b], blank, piece)
@@ -445,17 +760,38 @@ def _build_geometry() -> array.array:
         _add_triangle(data, [back_apex, back_inset_b, back_inset_a], blank, piece)
 
         # Radial cut faces. Without these a wedge is an open shell, and the
-        # tumbling pieces read as hollow the moment they turn edge-on. Each
-        # cut is a hexagon in the plane through the shard's axis and one rim
-        # point; fan it from the front apex.
-        for profile in (
-            [front_apex, inset_a, rim_a, back_rim_a, back_inset_a, back_apex],
-            [front_apex, inset_b, rim_b, back_rim_b, back_inset_b, back_apex],
+        # tumbling pieces read as hollow the moment they turn edge-on. Each cut
+        # is a convex polygon in the plane through the shard's axis and one rim
+        # point.
+        #
+        # The front run of each profile is the cap's own radial chain, reused
+        # vertex-for-vertex: a straight apex-to-inset segment against a curved
+        # cap would leave a crescent gap down every cut, visible the moment the
+        # pieces separate.
+        #
+        # Fanned from the *rim*, not the apex. The chain's points are collinear
+        # with the apex whenever bulge is 0, so an apex fan produced zero-area
+        # facets there -- and a zero-area facet has no normal, which breaks the
+        # winding contract the two-pass transparency depends on. The rim lies
+        # off that line at every bulge, and the cross-section is convex, so a
+        # fan from it is always well formed.
+        for chain_a, rim, back_rim, back_inset in (
+            ([rings[j][0] for j in range(len(rings))],
+             rim_a, back_rim_a, back_inset_a),
+            ([rings[j][j] for j in range(len(rings))],
+             rim_b, back_rim_b, back_inset_b),
         ):
-            for k in range(1, len(profile) - 1):
+            profile = chain_a + [rim, back_rim, back_inset, back_apex]
+            pivot = len(chain_a)  # index of `rim`
+            count = len(profile)
+            for step in range(1, count - 1):
                 _add_triangle(
                     data,
-                    [profile[0], profile[k], profile[k + 1]],
+                    [
+                        profile[pivot],
+                        profile[(pivot + step) % count],
+                        profile[(pivot + step + 1) % count],
+                    ],
                     blank,
                     piece,
                     cap=1.0,
@@ -526,8 +862,11 @@ class ShardWidget(QOpenGLWidget):
 
         self._vao = QOpenGLVertexArrayObject()
         self._vbo = QOpenGLBuffer(QOpenGLBuffer.VertexBuffer)
-        self._vertex_data = _build_geometry()
-        self._vertex_count = len(self._vertex_data) // _FLOATS_PER_VERTEX
+        self._vertex_data = array.array("f")
+        self._vertex_count = 0
+        self._geometry_key = None
+        self._geometry_dirty = True
+        self._rebuild_geometry()
 
         self.setMinimumSize(280, 280)
 
@@ -582,7 +921,29 @@ class ShardWidget(QOpenGLWidget):
     def refresh_params(self) -> None:
         """Call after mutating ``params`` from the tuning panel."""
         self._text_dirty = True  # font/colour may have changed
+        self._rebuild_geometry()
         self.update()
+
+    def _rebuild_geometry(self) -> bool:
+        """Rebuild the vertex data if the curvature parameters moved.
+
+        Keyed on the values rather than rebuilt unconditionally: refresh_params
+        fires on *every* slider, and re-tessellating plus re-uploading the
+        buffer because someone nudged the specular power would be silly.
+        Returns True if the data changed, so initializeGL/paintGL know whether
+        the VBO needs reallocating.
+        """
+        subdiv = max(0, min(_FRONT_SUBDIV_MAX, int(round(self.params.front_subdiv))))
+        bulge = max(0.0, min(1.0, float(self.params.front_bulge)))
+        key = (subdiv, bulge)
+        if key == self._geometry_key:
+            return False
+
+        self._geometry_key = key
+        self._vertex_data = _build_geometry(subdiv, bulge)
+        self._vertex_count = len(self._vertex_data) // _FLOATS_PER_VERTEX
+        self._geometry_dirty = True
+        return True
 
     # -- shader loading ---------------------------------------------------
 
@@ -874,6 +1235,23 @@ class ShardWidget(QOpenGLWidget):
         if location >= 0:
             self._program.setUniformValue1f(location, value)
 
+    def _upload_geometry(self) -> None:
+        """(Re)allocate the VBO from _vertex_data.
+
+        allocate() resizes as well as fills, which is what makes the
+        subdivision slider work: the buffer grows from 288 vertices at level 0
+        to ~19k at level 5. The attribute pointers are unaffected -- they are
+        offsets into whatever buffer is bound, and the stride never changes.
+        """
+        self._geometry_dirty = False
+        if not self._vbo.isCreated():
+            return
+        self._vbo.bind()
+        self._vbo.allocate(
+            self._vertex_data.tobytes(), len(self._vertex_data) * 4
+        )
+        self._vbo.release()
+
     def _bind_attributes(self) -> None:
         assert self._program is not None
         self._vao.bind()
@@ -924,11 +1302,7 @@ class ShardWidget(QOpenGLWidget):
 
         self._vao.create()
         self._vbo.create()
-        self._vbo.bind()
-        self._vbo.allocate(
-            self._vertex_data.tobytes(), len(self._vertex_data) * 4
-        )
-        self._vbo.release()
+        self._upload_geometry()
 
         # Core profile requires a bound VAO for any draw, even one that fetches
         # no attributes. The sky triangle builds itself from gl_VertexID.
@@ -944,6 +1318,8 @@ class ShardWidget(QOpenGLWidget):
             self._load_sky_program()
         if self._text_dirty:
             self._upload_text()
+        if self._geometry_dirty:
+            self._upload_geometry()
 
         fns = self.context().functions()
         fns.glClear(_GL_COLOR_BUFFER_BIT | _GL_DEPTH_BUFFER_BIT)

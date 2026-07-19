@@ -79,6 +79,14 @@ _SLIDERS = [
     ("base_alpha", 0.0, 1.0),
 ]
 
+# These two retessellate the shard rather than setting a uniform. front_subdiv
+# gets scale 1 so the slider steps in whole levels -- at the default scale of
+# 100 it would take a hundred nudges to move from level 2 to level 3.
+_GEOMETRY_SLIDERS = [
+    ("front_subdiv", 0.0, 5.0, 1),
+    ("front_bulge", 0.0, 1.0),
+]
+
 _SKY_SLIDERS = [
     ("nebula", 0.0, 1.5),
     ("star_density", 10.0, 200.0),
@@ -151,6 +159,7 @@ class TuningPanel(QWidget):
         columns.addLayout(right)
 
         left.addWidget(self._slider_group("Glass", _SLIDERS))
+        left.addWidget(self._slider_group("Front face", _GEOMETRY_SLIDERS))
         right.addWidget(self._slider_group("Camera", _CAMERA_SLIDERS))
         right.addWidget(self._slider_group("Sky", _SKY_SLIDERS))
 
@@ -222,15 +231,16 @@ class TuningPanel(QWidget):
     def _slider_group(self, title: str, specs) -> QGroupBox:
         box = QGroupBox(title)
         form = QFormLayout(box)
-        for name, lo, hi in specs:
+        for name, lo, hi, *rest in specs:
+            scale = rest[0] if rest else 100
             slider = QSlider(Qt.Horizontal)
-            slider.setRange(int(lo * 100), int(hi * 100))
-            slider.setValue(int(getattr(self._params, name) * 100))
+            slider.setRange(int(lo * scale), int(hi * scale))
+            slider.setValue(int(round(getattr(self._params, name) * scale)))
             label = QLabel(f"{getattr(self._params, name):.2f}")
             self._labels[name] = label
             self._sliders[name] = slider
             slider.valueChanged.connect(
-                lambda v, n=name: self._on_slider(n, v / 100.0)
+                lambda v, n=name, s=scale: self._on_slider(n, v / s)
             )
             row = QWidget()
             row_layout = QVBoxLayout(row)
@@ -358,7 +368,9 @@ class TuningPanel(QWidget):
     def _dump(self) -> None:
         p: ShardParams = self._params
         print("\n# --- paste into ShardParams defaults ---")
-        for name, _lo, _hi in _SLIDERS + _CAMERA_SLIDERS + _SKY_SLIDERS:
+        for name, _lo, _hi, *_ in (
+            _SLIDERS + _GEOMETRY_SLIDERS + _CAMERA_SLIDERS + _SKY_SLIDERS
+        ):
             print(f"    {name}: float = {getattr(p, name):.2f}")
         for name in (
             "glass_color", "text_color", "light_color",

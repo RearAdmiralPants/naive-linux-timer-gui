@@ -100,6 +100,7 @@ class NoGlTest(unittest.TestCase):
     def test_geometry_is_a_solid_of_flat_shaded_facets(self):
         from naive_timer.shard import (
             _FLOATS_PER_VERTEX as floats_per_vertex,
+            _tris_per_wedge,
             _OUTLINE,
             _build_geometry,
         )
@@ -108,9 +109,9 @@ class NoGlTest(unittest.TestCase):
         self.assertEqual(len(data) % floats_per_vertex, 0)
 
         vertices = len(data) // floats_per_vertex
-        # Per wedge: front face, 2 front bevel, 2 side wall, 2 back bevel,
-        # back face, 8 radial caps = 16 triangles.
-        self.assertEqual(vertices, 3 * 16 * len(_OUTLINE))
+        # _build_geometry defaults to front subdivision 0, which is the
+        # original single front triangle per wedge: 16 triangles in all.
+        self.assertEqual(vertices, 3 * _tris_per_wedge(0) * len(_OUTLINE))
 
         for i in range(vertices):
             base = i * floats_per_vertex
@@ -191,7 +192,10 @@ class NoGlTest(unittest.TestCase):
         is near-perpendicular to the direction from the shard centre and the
         sign of that dot product is meaningless.
         """
-        from naive_timer.shard import _FLOATS_PER_VERTEX as stride, _build_geometry
+        from naive_timer.shard import (
+            _FLOATS_PER_VERTEX as stride,
+            _tris_per_wedge, _build_geometry,
+        )
 
         data = _build_geometry()
         for i in range(0, len(data) // stride, 3):
@@ -216,11 +220,12 @@ class NoGlTest(unittest.TestCase):
         from collections import Counter
 
         from naive_timer.shard import (
-            _FLOATS_PER_VERTEX as stride, _OUTLINE, _build_geometry,
+            _FLOATS_PER_VERTEX as stride,
+            _tris_per_wedge, _OUTLINE, _build_geometry,
         )
 
         data = _build_geometry()
-        verts_per_wedge = 3 * 16
+        verts_per_wedge = 3 * _tris_per_wedge(0)
 
         def key(v):  # quantise, so shared corners compare equal
             return tuple(round(c, 5) for c in v)
@@ -228,7 +233,7 @@ class NoGlTest(unittest.TestCase):
         for wedge in range(len(_OUTLINE)):
             edges = Counter()
             start = wedge * verts_per_wedge
-            for t in range(16):
+            for t in range(_tris_per_wedge(0)):
                 tri = [
                     key(data[(start + t * 3 + k) * stride : (start + t * 3 + k) * stride + 3])
                     for k in range(3)
@@ -244,7 +249,8 @@ class NoGlTest(unittest.TestCase):
     def test_only_the_cut_faces_are_flagged_as_caps(self):
         """The cap flag drives the fragment discard while the shard is whole."""
         from naive_timer.shard import (
-            _FLOATS_PER_VERTEX as stride, _OUTLINE, _build_geometry,
+            _FLOATS_PER_VERTEX as stride,
+            _tris_per_wedge, _OUTLINE, _build_geometry,
         )
 
         data = _build_geometry()
@@ -256,11 +262,12 @@ class NoGlTest(unittest.TestCase):
     def test_a_wedge_shares_one_rigid_body(self):
         """Front face, walls and back of one wedge must tumble together."""
         from naive_timer.shard import (
-            _FLOATS_PER_VERTEX as stride, _OUTLINE, _build_geometry,
+            _FLOATS_PER_VERTEX as stride,
+            _tris_per_wedge, _OUTLINE, _build_geometry,
         )
 
         data = _build_geometry()
-        verts_per_wedge = 3 * 16
+        verts_per_wedge = 3 * _tris_per_wedge(0)
 
         for wedge in range(len(_OUTLINE)):
             bodies = {
@@ -283,11 +290,12 @@ class NoGlTest(unittest.TestCase):
         import math
 
         from naive_timer.shard import (
-            _FLOATS_PER_VERTEX as stride, _OUTLINE, _build_geometry,
+            _FLOATS_PER_VERTEX as stride,
+            _tris_per_wedge, _OUTLINE, _build_geometry,
         )
 
         data = _build_geometry()
-        verts_per_wedge = 3 * 16
+        verts_per_wedge = 3 * _tris_per_wedge(0)
 
         centres = []
         for wedge in range(len(_OUTLINE)):
@@ -321,10 +329,11 @@ class NoGlTest(unittest.TestCase):
         from naive_timer.shard import (
             _OUTLINE, _SHATTER_CLEAR_S, _build_geometry,
             _FLOATS_PER_VERTEX as stride,
+            _tris_per_wedge,
         )
 
         data = _build_geometry()
-        verts_per_wedge = 3 * 16
+        verts_per_wedge = 3 * _tris_per_wedge(0)
         t = _SHATTER_CLEAR_S
         gravity_y = -0.32
 
@@ -352,11 +361,12 @@ class NoGlTest(unittest.TestCase):
         import math
 
         from naive_timer.shard import (
-            _FLOATS_PER_VERTEX as stride, _OUTLINE, _build_geometry,
+            _FLOATS_PER_VERTEX as stride,
+            _tris_per_wedge, _OUTLINE, _build_geometry,
         )
 
         data = _build_geometry()
-        verts_per_wedge = 3 * 16
+        verts_per_wedge = 3 * _tris_per_wedge(0)
 
         for wedge in range(len(_OUTLINE)):
             base = wedge * verts_per_wedge * stride
@@ -431,6 +441,276 @@ class NoGlTest(unittest.TestCase):
 
         self.assertEqual(ink(blank), 0, "empty text must draw nothing")
         self.assertGreater(ink(drawn), 0, "numerals must leave ink")
+
+
+class CurvedFrontTest(unittest.TestCase):
+    """The front-face subdivision and bulge sliders.
+
+    The invariants the flat model already had -- watertight wedges, outward
+    unit normals -- are the ones most likely to break when the cap curves, so
+    they are re-checked at every level rather than only at the default.
+    """
+
+    LEVELS = range(6)
+    BULGES = (0.0, 0.65, 1.0)
+
+    def _wedges(self, data, subdiv):
+        from naive_timer.shard import (
+            _FLOATS_PER_VERTEX as stride, _OUTLINE, _tris_per_wedge,
+        )
+
+        per = _tris_per_wedge(subdiv)
+        for wedge in range(len(_OUTLINE)):
+            start = wedge * per * 3
+            yield [
+                [data[(start + t * 3 + k) * stride:(start + t * 3 + k) * stride + 3]
+                 for k in range(3)]
+                for t in range(per)
+            ]
+
+    def test_level_zero_reproduces_the_original_six_triangles(self):
+        """The slider's origin must be a true no-op, not merely a close one.
+
+        If level 0 differed from the shipped model, every existing tuned
+        parameter set in default-params.json would render subtly differently
+        the moment this feature landed.
+        """
+        from naive_timer.shard import _build_geometry
+
+        self.assertEqual(_build_geometry(), _build_geometry(0, 0.0))
+
+    def test_every_wedge_stays_a_closed_solid_at_every_level(self):
+        """Subdividing the cap subdivides two edges it shares with neighbours.
+
+        The cap's inset edge is shared with the front bevel and its two radial
+        chains with the cut faces. Miss either and the wedge becomes an open
+        shell with T-junctions -- which is invisible while the shard is whole
+        and glaringly hollow the instant it shatters.
+        """
+        from collections import Counter
+
+        from naive_timer.shard import _build_geometry
+
+        def key(v):
+            return tuple(round(c, 5) for c in v)
+
+        for subdiv in self.LEVELS:
+            for bulge in self.BULGES:
+                data = _build_geometry(subdiv, bulge)
+                for wedge, tris in enumerate(self._wedges(data, subdiv)):
+                    edges = Counter()
+                    for tri in tris:
+                        pts = [key(v) for v in tri]
+                        for a, b in ((0, 1), (1, 2), (2, 0)):
+                            edges[frozenset((pts[a], pts[b]))] += 1
+                    self.assertEqual(
+                        [e for e, n in edges.items() if n != 2], [],
+                        f"wedge {wedge} open at subdiv={subdiv} bulge={bulge}",
+                    )
+
+    def test_normals_stay_unit_and_outward_at_every_level(self):
+        """A zero-area facet has no normal, and the transparency passes cull
+        by winding -- so a degenerate triangle silently corrupts draw order.
+
+        This caught the first implementation: the cut faces were fanned from
+        the apex, and at bulge 0 the cap's radial chain is exactly collinear
+        with the apex, so every fan triangle had zero area.
+        """
+        import math
+
+        from naive_timer.shard import (
+            _FLOATS_PER_VERTEX as stride, _build_geometry,
+        )
+
+        for subdiv in self.LEVELS:
+            for bulge in self.BULGES:
+                data = _build_geometry(subdiv, bulge)
+                for i in range(0, len(data) // stride, 3):
+                    base = i * stride
+                    nx, ny, nz = data[base + 3:base + 6]
+                    self.assertAlmostEqual(
+                        math.sqrt(nx * nx + ny * ny + nz * nz), 1.0, places=4,
+                        msg=f"subdiv={subdiv} bulge={bulge} tri={i // 3}",
+                    )
+                    tri = [
+                        data[(i + k) * stride:(i + k) * stride + 3]
+                        for k in range(3)
+                    ]
+                    centre = data[base + 8:base + 11]
+                    dot = sum(
+                        (sum(v[j] for v in tri) / 3.0 - centre[j]) * n
+                        for j, n in enumerate((nx, ny, nz))
+                    )
+                    self.assertGreater(
+                        dot, 0.0,
+                        f"inward at subdiv={subdiv} bulge={bulge} tri={i // 3}",
+                    )
+
+    def test_the_cap_is_smooth_shaded_not_faceted(self):
+        """The whole point of the exercise.
+
+        Flat normals would make a subdivided dome trade six big facets for
+        thousands of small ones -- a smooth silhouette with a visibly faceted
+        highlight. Adjacent front-face triangles must therefore share a normal
+        at a shared vertex, which flat shading can never do.
+        """
+        from naive_timer.shard import (
+            _FLOATS_PER_VERTEX as stride, _build_geometry,
+        )
+
+        data = _build_geometry(3, 1.0)
+        by_position = {}
+        for v in range(len(data) // stride):
+            base = v * stride
+            if data[base + 17]:       # cap face, not the front
+                continue
+            pos = tuple(round(c, 5) for c in data[base:base + 3])
+            by_position.setdefault(pos, set()).add(
+                tuple(round(c, 4) for c in data[base + 3:base + 6])
+            )
+
+        # Interior cap vertices are shared by six facets; each must agree.
+        shared = [n for pos, n in by_position.items() if pos[2] > 0.06]
+        self.assertTrue(shared, "no interior cap vertices found")
+        self.assertTrue(
+            all(len(n) == 1 for n in shared),
+            "front-face vertices carry per-facet normals: still flat shaded",
+        )
+
+    def test_bulge_raises_the_apex_monotonically(self):
+        """The bulge slider must actually curve the face, and pin the rim."""
+        from naive_timer.shard import (
+            _BEVEL_Z, _FLOATS_PER_VERTEX as stride, _PEAK_Z, _build_geometry,
+        )
+
+        peaks = []
+        for bulge in (0.0, 0.25, 0.5, 0.75, 1.0):
+            data = _build_geometry(3, bulge)
+            zs = [data[v * stride + 2] for v in range(len(data) // stride)]
+            peaks.append(max(zs))
+
+        self.assertAlmostEqual(peaks[0], _PEAK_Z, places=5)
+        for lower, higher in zip(peaks, peaks[1:]):
+            self.assertGreater(higher, lower)
+
+        # The inset ring is where the cap meets the bevel; it must not move,
+        # or the tangent blend is riding the whole surface up instead of
+        # curving it.
+        for bulge in (0.0, 1.0):
+            data = _build_geometry(3, bulge)
+            ring = [
+                data[v * stride + 2]
+                for v in range(len(data) // stride)
+                # z > 0 excludes the *back* inset ring, which sits at the same
+                # radius and would otherwise fail this as a false positive.
+                if data[v * stride + 2] > 0.0
+                and abs(math.hypot(*data[v * stride:v * stride + 2]) - 0.855) < 0.02
+            ]
+            self.assertTrue(ring)
+            for z in ring:
+                self.assertAlmostEqual(z, _BEVEL_Z, places=2)
+
+    def test_the_crease_at_the_rim_closes_as_bulge_rises(self):
+        """Tangent continuity is the visible payoff: no hard edge where the
+        cap meets the chamfer. Measure it as the angle between the outermost
+        cap facet and the bevel facet it abuts -- that angle must shrink
+        toward zero as bulge goes to 1.
+        """
+        import math
+
+        from naive_timer.shard import (
+            _FLOATS_PER_VERTEX as stride, _build_geometry,
+        )
+
+        def facet_normal(tri):
+            (ax, ay, az), (bx, by, bz), (cx, cy, cz) = tri
+            ux, uy, uz = bx - ax, by - ay, bz - az
+            vx, vy, vz = cx - ax, cy - ay, cz - az
+            nx, ny, nz = (
+                uy * vz - uz * vy, uz * vx - ux * vz, ux * vy - uy * vx,
+            )
+            if nz < 0.0:
+                nx, ny, nz = -nx, -ny, -nz
+            length = math.sqrt(nx * nx + ny * ny + nz * nz) or 1.0
+            return (nx / length, ny / length, nz / length)
+
+        def worst_crease(bulge):
+            """Largest dihedral across a cap/bevel shared edge.
+
+            Measured from the *geometry*, on facets that genuinely abut --
+            comparing a cap normal against every bevel normal in the model
+            mixes unrelated wedges and measures the outline's irregularity
+            instead of the join.
+            """
+            data = _build_geometry(4, bulge)
+            cap_edges, bevel_edges = {}, {}
+            for i in range(0, len(data) // stride, 3):
+                base = i * stride
+                if data[base + 17]:          # radial cut face, not a surface
+                    continue
+                tri = [
+                    tuple(round(c, 5) for c in
+                          data[(i + k) * stride:(i + k) * stride + 3])
+                    for k in range(3)
+                ]
+                zs = [v[2] for v in tri]
+                if min(zs) >= 0.0499:        # on or above the inset ring: cap
+                    bucket = cap_edges
+                elif max(zs) <= 0.0501:      # on or below it: front bevel
+                    bucket = bevel_edges
+                else:
+                    continue
+                normal = facet_normal(tri)
+                for a, b in ((0, 1), (1, 2), (2, 0)):
+                    bucket.setdefault(frozenset((tri[a], tri[b])), []).append(normal)
+
+            joins = [
+                (cn, bn)
+                for edge, caps in cap_edges.items()
+                for cn in caps
+                for bn in bevel_edges.get(edge, ())
+            ]
+            assert joins, "found no cap/bevel shared edges to measure"
+            return max(
+                math.degrees(math.acos(max(-1.0, min(1.0, sum(
+                    a * b for a, b in zip(cn, bn)
+                )))))
+                for cn, bn in joins
+            )
+
+        creased = worst_crease(0.0)
+        smooth = worst_crease(1.0)
+        self.assertGreater(
+            creased, 20.0, "the flat model should have a real crease"
+        )
+        self.assertLess(
+            smooth, creased * 0.5,
+            f"bulge=1 must close the crease: {creased:.1f} -> {smooth:.1f} deg",
+        )
+
+    def test_triangle_growth_stays_within_reason(self):
+        """The ceiling is set by visual return, not by frame rate.
+
+        If someone raises _FRONT_SUBDIV_MAX expecting the slider to reach a
+        frame-rate wall, this is the note that says it will not: the app is
+        fragment-bound, and level 5 is already past the point where the
+        silhouette visibly improves.
+        """
+        from naive_timer.shard import (
+            _FRONT_SUBDIV_MAX, _OUTLINE, _tris_per_wedge,
+        )
+
+        self.assertEqual(_tris_per_wedge(0) * len(_OUTLINE), 96)
+        top = _tris_per_wedge(_FRONT_SUBDIV_MAX) * len(_OUTLINE)
+        self.assertLess(top, 10_000)
+
+    def test_geometry_is_deterministic_at_every_level(self):
+        from naive_timer.shard import _build_geometry
+
+        for subdiv in self.LEVELS:
+            self.assertEqual(
+                _build_geometry(subdiv, 0.7), _build_geometry(subdiv, 0.7)
+            )
 
 
 @needs_qt
