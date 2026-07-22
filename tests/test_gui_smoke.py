@@ -318,24 +318,25 @@ class NoGlTest(unittest.TestCase):
         self.assertEqual(_build_geometry(), _build_geometry())
 
     def test_pieces_are_gone_by_the_declared_clear_time(self):
-        """_SHATTER_CLEAR_S stops the draw calls; a piece must not outlive it.
+        """The default clear time stops the draw calls; a piece must not outlive it.
 
-        Integrates the same trajectory the vertex shader uses. If someone
-        retunes the velocities and a wedge lingers, this fails rather than
-        letting a frozen shard sit on screen for two minutes.
+        Integrates the same trajectory the vertex shader uses, at the default
+        gravity and clear time. If someone retunes the velocities and a wedge
+        lingers, this fails rather than letting a frozen shard sit on screen.
         """
         import math
 
         from naive_timer.shard import (
-            _OUTLINE, _SHATTER_CLEAR_S, _build_geometry,
+            _OUTLINE, _GRAVITY_1G, ShardParams, _build_geometry,
             _FLOATS_PER_VERTEX as stride,
             _tris_per_wedge,
         )
 
+        params = ShardParams()
         data = _build_geometry()
         verts_per_wedge = 3 * _tris_per_wedge(0)
-        t = _SHATTER_CLEAR_S
-        gravity_y = -0.32
+        t = params.shatter_clear_s
+        gravity_y = -params.gravity * _GRAVITY_1G
 
         for wedge in range(len(_OUTLINE)):
             base = wedge * verts_per_wedge * stride
@@ -381,6 +382,100 @@ class NoGlTest(unittest.TestCase):
                 math.sqrt(sum(a * a for a in axis)), 0.05,
                 f"wedge {wedge} never turns: no angular velocity",
             )
+
+    def test_wedge_bounds_enclose_every_vertex(self):
+        """Each wedge's bounding radius must actually contain its geometry.
+
+        The early-clear check relies on the sphere (centre, radius) enclosing
+        the whole wedge for all time. Tumbling only rotates a vertex about the
+        centre, so it's enough to prove the radius covers every rest vertex --
+        if it does, no rotation can push a vertex outside it.
+        """
+        import math
+
+        from naive_timer.shard import (
+            _FLOATS_PER_VERTEX as stride,
+            _OUTLINE, _build_geometry, _wedge_bounds,
+        )
+
+        data = _build_geometry()
+        bounds = _wedge_bounds(data)
+        self.assertEqual(len(bounds), len(_OUTLINE))
+
+        verts_per_wedge = (len(data) // stride) // len(_OUTLINE)
+        for wedge, (centre, _vel, radius) in enumerate(bounds):
+            self.assertGreater(radius, 0.0, f"wedge {wedge} has zero radius")
+            base = wedge * verts_per_wedge * stride
+            for v in range(verts_per_wedge):
+                off = base + v * stride
+                d = math.dist(data[off : off + 3], centre)
+                self.assertLessEqual(
+                    d, radius + 1e-6,
+                    f"wedge {wedge} vertex {v} sits outside its bounding radius",
+                )
+
+    def test_frustum_test_distinguishes_on_and_off_screen(self):
+        """The bounding-sphere frustum test is the heart of early-clear.
+
+        A sphere parked far to the side is off screen; one sitting at the origin
+        (dead centre of a camera that always looks there) is on screen. No GL or
+        real geometry needed -- the check is pure math over _wedge_bounds.
+        """
+        import types
+
+        from naive_timer.shard import ShardParams
+
+        # A minimal stand-in: the check only touches these attributes/methods.
+        from naive_timer.shard import ShardWidget
+
+        probe = ShardWidget.__new__(ShardWidget)
+        probe.params = ShardParams(shatter_clear_s=60.0, gravity=1.0)
+        probe._spin_at_break = 0.0
+        probe._shatter_t = 1.0
+        probe._elapsed = 1.0
+        probe.width = types.MethodType(lambda self: 420, probe)
+        probe.height = types.MethodType(lambda self: 620, probe)
+
+        probe._wedge_bounds = [((100.0, 0.0, 0.0), (0.0, 0.0, 0.0), 0.5)]
+        self.assertTrue(probe._all_pieces_offscreen(), "far-off sphere is gone")
+
+        probe._wedge_bounds = [((0.0, 0.0, 0.0), (0.0, 0.0, 0.0), 0.5)]
+        self.assertFalse(
+            probe._all_pieces_offscreen(), "sphere at the focus is on screen"
+        )
+
+    def test_early_clear_does_not_latch(self):
+        """A piece that re-enters must un-clear, so the shard redraws.
+
+        The check is intentionally not sticky: a full orbit (or a wide sway) can
+        sweep the camera back toward a piece that had left the frame. Feeding the
+        refresh an off-screen set then an on-screen set must flip the verdict
+        back, not hold the stale 'cleared'.
+        """
+        import types
+
+        from naive_timer.shard import ShardParams, ShardWidget
+
+        probe = ShardWidget.__new__(ShardWidget)
+        probe.params = ShardParams(shatter_clear_s=60.0, gravity=1.0)
+        probe._spin_at_break = 0.0
+        probe._early_cleared = False
+        probe._next_clear_check = 0.0
+        probe.width = types.MethodType(lambda self: 420, probe)
+        probe.height = types.MethodType(lambda self: 620, probe)
+
+        probe._shatter_t = probe._elapsed = 1.0
+        probe._wedge_bounds = [((100.0, 0.0, 0.0), (0.0, 0.0, 0.0), 0.5)]
+        probe._refresh_early_clear()
+        self.assertTrue(probe.pieces_have_cleared)
+
+        probe._shatter_t = probe._elapsed = 1.5
+        probe._next_clear_check = 0.0  # force the throttle open
+        probe._wedge_bounds = [((0.0, 0.0, 0.0), (0.0, 0.0, 0.0), 0.5)]
+        probe._refresh_early_clear()
+        self.assertFalse(
+            probe.pieces_have_cleared, "verdict must un-latch when a piece returns"
+        )
 
     def test_settings_round_trip_through_json(self):
         """Save then load must reproduce every field, colours included.
@@ -750,6 +845,42 @@ class GlTest(unittest.TestCase):
 
         shard.set_alarm(False)
         self.assertEqual(shard._shatter_t, 0.0, "reset reassembles the shard")
+
+    def test_early_clear_beats_the_timeout_but_not_the_pieces(self):
+        """The pieces stop being drawn when they're gone, before the hard cap.
+
+        With a long timeout the wedges leave the frame long before it expires,
+        so pieces_have_cleared must trip early -- yet it must never trip while
+        the shard is still intact and centred in view.
+        """
+        from naive_timer.shard import ShardParams, ShardWidget
+
+        class Model:
+            is_running = True
+
+        params = ShardParams(gravity=1.0, shatter_clear_s=20.0)
+        shard = ShardWidget(Model(), params)
+        shard.resize(420, 620)
+        shard.set_alarm(True)
+
+        # Freshly broken: the shard fills the frame, nothing has cleared.
+        shard.advance(0.05)
+        self.assertFalse(shard.pieces_have_cleared)
+
+        cleared_at = None
+        t = 0.05
+        while t < params.shatter_clear_s:
+            shard.advance(1 / 60.0)
+            t += 1 / 60.0
+            if shard.pieces_have_cleared:
+                cleared_at = t
+                break
+
+        self.assertIsNotNone(cleared_at, "pieces never cleared before the cap")
+        self.assertLess(
+            cleared_at, params.shatter_clear_s - 2.0,
+            "early clear should beat the 20s cap by a wide margin",
+        )
 
     def test_camera_never_swings_behind_the_numerals(self):
         """This is a timer. The readout must stay legible at every phase.

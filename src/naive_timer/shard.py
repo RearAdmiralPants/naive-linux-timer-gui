@@ -169,10 +169,10 @@ def _tris_per_wedge(subdiv: int) -> int:
 # up with the geometry.
 _FOV_DEGREES = 38.0
 
-# Seconds for the pieces to clear the frame -- measured by rendering the
-# sequence and counting non-background pixels, not guessed. The alert runs for
-# 120 s, so the shard is gone for most of it; after this we stop drawing.
-_SHATTER_CLEAR_S = 5.5
+# Downward acceleration (scene units/s^2) that ShardParams.gravity == 1.0 maps
+# to -- the value the fall was originally tuned against. The slider scales this,
+# so gravity=2.0 is twice as heavy and gravity=0.0 lets the pieces drift flat.
+_GRAVITY_1G = 0.32
 
 
 def parse_hex_color(text: str) -> tuple:
@@ -223,6 +223,13 @@ class ShardParams:
     light_color: tuple = (1.00, 1.00, 1.00)
     font_family: str = "monospace"
     font_bold: bool = True
+
+    # Shatter physics. gravity is in g: 0 leaves the pieces drifting flat, 1 is
+    # the tuned fall, 2 is heavy. shatter_clear_s is how long the tumbling
+    # wedges keep being drawn before the shard stops rasterising -- and, on the
+    # Stopwatch, how long the Reset shatter runs before it reassembles at zero.
+    gravity: float = 1.0
+    shatter_clear_s: float = 5.5
 
     # Front-face curvature. Unlike everything above, these two rebuild the
     # vertex buffer rather than setting a uniform -- see _geometry_dirty.
@@ -631,6 +638,41 @@ def _wedge_rigid_body(i: int, corners) -> tuple:
     return centre, velocity, axis
 
 
+def _wedge_bounds(data: array.array) -> list:
+    """Per-wedge (centre, launch velocity, radius) read back from the buffer.
+
+    A wedge's vertices are one contiguous block, and its pivot centre and
+    launch velocity are stored identically on every one of them (see
+    ``_build_geometry``). The radius is the farthest any vertex sits from that
+    centre -- and since the shatter only *rotates* a vertex about the centre
+    (tumble) and *translates* the centre (drift + gravity), that radius bounds
+    the whole piece for all time. So a sphere of this radius around the moving
+    centre contains the wedge no matter how far it has tumbled: exactly what the
+    early-clear frustum test needs, with no per-vertex work at check time.
+
+    Returns ``[(centre, velocity, radius), ...]``, one entry per wedge, in the
+    shard's rest frame (the idle-spin at the break is applied later).
+    """
+    stride = _FLOATS_PER_VERTEX
+    n_wedges = len(_OUTLINE)
+    total_verts = len(data) // stride
+    verts_per_wedge = total_verts // n_wedges
+    bounds = []
+    for w in range(n_wedges):
+        base = w * verts_per_wedge * stride
+        centre = tuple(data[base + 8 : base + 11])
+        velocity = tuple(data[base + 11 : base + 14])
+        radius = 0.0
+        for v in range(verts_per_wedge):
+            off = base + v * stride
+            dx = data[off] - centre[0]
+            dy = data[off + 1] - centre[1]
+            dz = data[off + 2] - centre[2]
+            radius = max(radius, math.sqrt(dx * dx + dy * dy + dz * dz))
+        bounds.append((centre, velocity, radius))
+    return bounds
+
+
 def _build_geometry(subdiv: int = 0, bulge: float = 0.0) -> array.array:
     """Extrude the outline into a solid, one wedge per edge.
 
@@ -860,6 +902,13 @@ class ShardWidget(QOpenGLWidget):
         self._text_dirty = True
         self._shaders_dirty = False
 
+        # Early-clear state: the shatter's fixed timeout is only an upper bound,
+        # so we stop drawing the instant the pieces are actually gone. See
+        # _refresh_early_clear / pieces_have_cleared.
+        self._wedge_bounds: list = []
+        self._early_cleared = False
+        self._next_clear_check = 0.0
+
         self._vao = QOpenGLVertexArrayObject()
         self._vbo = QOpenGLBuffer(QOpenGLBuffer.VertexBuffer)
         self._vertex_data = array.array("f")
@@ -891,10 +940,13 @@ class ShardWidget(QOpenGLWidget):
             # the rest pose. Otherwise the shard visibly snaps back to its
             # start angle on the frame it shatters.
             self._spin_at_break = self._spin
+            self._early_cleared = False
+            self._next_clear_check = 0.0
         else:
             # Reset reassembles the shard.
             self._shatter_t = 0.0
             self._alarm_phase = 0.0
+            self._early_cleared = False
 
     def advance(self, dt: float) -> None:
         # The sky drifts and twinkles in every state, including after the
@@ -906,6 +958,7 @@ class ShardWidget(QOpenGLWidget):
             # long after they have left the frame, until the user resets.
             self._shatter_t += dt
             self._alarm_phase += dt * 1.5 * 2.0 * math.pi
+            self._refresh_early_clear()
         else:
             # One idle speed, whether or not the model is running. Speeding up
             # while the timer ran drew the eye to the rotation instead of the
@@ -913,10 +966,125 @@ class ShardWidget(QOpenGLWidget):
             self._spin += dt * self.params.idle_spin
         self.update()
 
+    # How often the early-clear geometry check runs, in seconds of shatter time.
+    # A few times a second is ample: the pieces do not teleport.
+    _CLEAR_CHECK_INTERVAL_S = 0.25
+    # How far ahead each check looks. It only has to bridge the gap to the next
+    # check with margin -- the check re-runs continuously, so a re-entry is
+    # caught then rather than having to be foreseen now. Kept > the interval so
+    # consecutive look-aheads overlap and leave no instant uncovered.
+    _CLEAR_HORIZON_S = 0.5
+
+    def _refresh_early_clear(self) -> None:
+        """Re-test, a few times a second, whether the pieces are gone right now.
+
+        Deliberately *not* latched. A piece that has left the frame can re-enter
+        later -- a wide sway, or a full orbit (sway_degrees=180), sweeps the
+        camera back toward it -- and when it does we must resume drawing. Because
+        the check looks only a short horizon ahead (not the whole timeout), it is
+        cheap enough to run for the shatter's full duration, and its cost no
+        longer grows with shatter_clear_s.
+        """
+        if self._shatter_t < self._next_clear_check:
+            return
+        self._next_clear_check = self._shatter_t + self._CLEAR_CHECK_INTERVAL_S
+        self._early_cleared = self._all_pieces_offscreen()
+
+    def _all_pieces_offscreen(self) -> bool:
+        """True if no wedge is on screen across the next look-ahead window.
+
+        Walks each wedge's bounding sphere along the exact trajectory the vertex
+        shader integrates (frozen idle-spin, drift, gravity) and tests it against
+        the view frustum -- re-evaluating the still-swaying camera at each sample
+        so a piece the camera pans *toward* isn't missed. Conservative: a sphere
+        that only clips a frustum corner counts as visible, so this can lag the
+        true clear but never triggers while anything is on screen.
+        """
+        bounds = self._wedge_bounds
+        if not bounds:
+            return False
+
+        now = self._shatter_t
+        timeout = self.params.shatter_clear_s
+        if now >= timeout:
+            return True
+
+        gy_half = 0.5 * self.params.gravity * _GRAVITY_1G
+        spin = self._spin_at_break
+        cs, sn = math.cos(spin), math.sin(spin)
+        elapsed_at_break = self._elapsed - self._shatter_t
+
+        # Idle-spin (about Y) was frozen at the break and rotates each wedge's
+        # rest-frame centre and launch velocity once. Neither depends on t or on
+        # the camera, so spin them here -- not once per sample per wedge.
+        spun = []
+        for centre, vel, radius in bounds:
+            cx = cs * centre[0] + sn * centre[2]
+            cz = -sn * centre[0] + cs * centre[2]
+            vx = cs * vel[0] + sn * vel[2]
+            vz = -sn * vel[0] + cs * vel[2]
+            spun.append((cx, centre[1], cz, vx, vel[1], vz, radius))
+
+        aspect = max(self.width(), 1) / max(self.height(), 1)
+        tan_v = math.tan(math.radians(_FOV_DEGREES) / 2.0)
+        tan_h = tan_v * aspect
+        sec_v = math.sqrt(1.0 + tan_v * tan_v)
+        sec_h = math.sqrt(1.0 + tan_h * tan_h)
+        near = 0.1
+
+        # A short, fixed look-ahead (capped at the timeout), sampled finely
+        # enough that a piece cannot cross the frame between two samples.
+        horizon = min(timeout, now + self._CLEAR_HORIZON_S)
+        step = 0.12
+        t = now
+        while True:
+            eye, right, up, forward = self.camera(elapsed_at_break + t)
+            # Pull the camera basis into plain floats once per sample: the
+            # frustum test below is then pure arithmetic, with no per-wedge
+            # PySide binding calls (which dominated the old inner loop).
+            ex, ey, ez = eye.x(), eye.y(), eye.z()
+            fx, fy, fz = forward.x(), forward.y(), forward.z()
+            rx, ry, rz = right.x(), right.y(), right.z()
+            ux, uy, uz = up.x(), up.y(), up.z()
+            tt = t * t
+            for cx, cy, cz, vx, vy, vz, radius in spun:
+                px = cx + vx * t
+                py = cy + vy * t - gy_half * tt
+                pz = cz + vz * t
+                dx = px - ex
+                dy = py - ey
+                dz = pz - ez
+                dv = dx * fx + dy * fy + dz * fz
+                xv = dx * rx + dy * ry + dz * rz
+                yv = dx * ux + dy * uy + dz * uz
+                dvth = dv * tan_h
+                dvtv = dv * tan_v
+                rh = radius * sec_h
+                rv = radius * sec_v
+                # Fully outside the frustum iff beyond any single plane by more
+                # than the radius. If no plane rejects it, treat it as visible.
+                if not (
+                    dv < near - radius
+                    or xv - dvth > rh    # past right
+                    or -xv - dvth > rh   # past left
+                    or yv - dvtv > rv    # past top
+                    or -yv - dvtv > rv   # past bottom
+                ):
+                    return False
+            if t >= horizon:
+                return True
+            t = min(t + step, horizon)
+
     @property
     def pieces_have_cleared(self) -> bool:
-        """True once the tumbling wedges are off screen."""
-        return self._shatter_t > _SHATTER_CLEAR_S
+        """True while the tumbling wedges are off screen (so paintGL can skip).
+
+        Tracks the latest early-clear check (see _all_pieces_offscreen), so it
+        can flip back to False if a piece re-enters -- the shard resumes drawing
+        for that window. ``shatter_clear_s`` is the hard upper bound past which
+        the shard is considered gone regardless.
+        """
+        return self._early_cleared or self._shatter_t > self.params.shatter_clear_s
 
     def refresh_params(self) -> None:
         """Call after mutating ``params`` from the tuning panel."""
@@ -943,6 +1111,7 @@ class ShardWidget(QOpenGLWidget):
         self._vertex_data = _build_geometry(subdiv, bulge)
         self._vertex_count = len(self._vertex_data) // _FLOATS_PER_VERTEX
         self._geometry_dirty = True
+        self._wedge_bounds = _wedge_bounds(self._vertex_data)
         return True
 
     # -- shader loading ---------------------------------------------------
@@ -1135,19 +1304,25 @@ class ShardWidget(QOpenGLWidget):
         fns.glEnable(_GL_BLEND)
         print(f"[sky] nebula baked into {_NEBULA_CUBE_SIZE}^2 cubemap")
 
-    def camera(self) -> tuple:
-        """Where the camera is and which way it faces, right now.
+    def camera(self, elapsed: float | None = None) -> tuple:
+        """Where the camera is and which way it faces.
 
         Sways across the front of the shard rather than orbiting it, and always
         looks at the origin. A sine sweep eases naturally at the extremes, so
         the reversal has no visible corner.
+
+        ``elapsed`` defaults to the live clock; passing a value evaluates the
+        camera at that animation time instead, which is how the early-clear
+        check sees where the still-swaying camera will point a moment from now.
 
         Returns ``(eye, right, up, forward)`` in world space. Both passes use
         this: the shard for its view matrix, the sky to rebuild a view ray per
         pixel. They must agree, or the backdrop slides against the geometry.
         """
         p = self.params
-        phase = self._elapsed * p.orbit_speed
+        if elapsed is None:
+            elapsed = self._elapsed
+        phase = elapsed * p.orbit_speed
         angle = math.radians(p.sway_degrees) * math.sin(phase)
 
         # Bob at a different rate from the sway, so the two never resynchronise
@@ -1377,6 +1552,7 @@ class ShardWidget(QOpenGLWidget):
         self._set_float("uBaseAlpha", float(p.base_alpha))
         self._set_float("uAlarm", float(alarm))
         self._set_float("uShatterT", float(self._shatter_t))
+        self._set_float("uGravity", float(p.gravity * _GRAVITY_1G))
         self._set_float("uSpin", float(self._spin))
         self._set_float("uSpinAtBreak", float(self._spin_at_break))
 

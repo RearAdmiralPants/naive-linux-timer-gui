@@ -24,6 +24,7 @@ uniform mat4 uProj;
 uniform mat3 uNormalMat;
 
 uniform float uShatterT;     // seconds since the break; 0 while intact
+uniform float uGravity;      // downward accel of the falling pieces (scaled g)
 uniform float uSpin;         // radians, slow idle rotation
 uniform float uSpinAtBreak;  // uSpin sampled the instant the shard broke
 
@@ -32,8 +33,8 @@ out vec3 vNormal;
 out vec2 vUV;
 out float vCap;
 
-// Gravity, so the pieces fall away rather than drifting flat.
-const vec3 GRAVITY = vec3(0.0, -0.32, 0.0);
+// Gravity, so the pieces fall away rather than drifting flat. Magnitude comes
+// in as a uniform (uGravity); 0 leaves them drifting on their launch velocity.
 
 mat3 axisRotation(vec3 axis, float angle) {
     float c = cos(angle);
@@ -78,7 +79,7 @@ void main() {
 
         // Rotate about the wedge's own centroid, then carry it away.
         pos = centre + tumble * (pos - centre);
-        pos += vel * t + 0.5 * GRAVITY * t * t;
+        pos += vel * t + 0.5 * vec3(0.0, -uGravity, 0.0) * t * t;
         nrm = tumble * nrm;
     }
 

@@ -26,6 +26,8 @@
   ],
   "font_family": "monospace",
   "font_bold": true,
+  "gravity": 0.0,
+  "shatter_clear_s": 10.5,
   "front_subdiv": 2.0,
   "front_bulge": 0.78,
   "orbit_speed": 0.03,

@@ -73,6 +73,8 @@ class StopwatchWidget(QWidget):
         super().__init__()
         self._sw = Stopwatch()
         self._shard = ShardWidget(self._sw, params)
+        # True from the Reset shatter until the pieces clear and we zero out.
+        self._resetting = False
 
         self._start_btn = QPushButton("Start")
         self._start_btn.clicked.connect(self._on_toggle)
@@ -93,16 +95,32 @@ class StopwatchWidget(QWidget):
         timer.start(FRAME_MS)
 
     def _on_toggle(self) -> None:
+        # Ignore Start/Pause while the shard is mid-shatter; the readout is
+        # frozen and the model is being reset out from under it.
+        if self._resetting:
+            return
         self._sw.toggle()
         self._start_btn.setText(
             "Pause" if self._sw.state is State.RUNNING else "Start"
         )
 
     def _on_reset(self) -> None:
-        self._sw.reset()
+        # Reset shatters the shard rather than snapping to zero. Pausing first
+        # freezes the readout at its final value so the numerals fly apart
+        # showing that time; the model is zeroed only once the pieces clear
+        # (see _tick), after which the shard reassembles at 00:00:00.
+        if self._resetting:
+            return
+        self._resetting = True
+        self._sw.pause()
+        self._shard.set_alarm(True)
         self._start_btn.setText("Start")
 
     def _tick(self) -> None:
+        if self._resetting and self._shard.pieces_have_cleared:
+            self._sw.reset()
+            self._shard.set_alarm(False)  # reassemble at zero
+            self._resetting = False
         self._shard.set_text(format_elapsed(self._sw.elapsed()))
         self._shard.advance(self._clock.tick())
 

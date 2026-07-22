@@ -87,6 +87,11 @@ _GEOMETRY_SLIDERS = [
     ("front_bulge", 0.0, 1.0),
 ]
 
+_SHATTER_SLIDERS = [
+    ("gravity", 0.0, 2.0),          # g: 0 drifts flat, 1 the tuned fall, 2 heavy
+    ("shatter_clear_s", 1.0, 20.0), # seconds the pieces are drawn before clearing
+]
+
 _SKY_SLIDERS = [
     ("nebula", 0.0, 1.5),
     ("star_density", 10.0, 200.0),
@@ -160,6 +165,7 @@ class TuningPanel(QWidget):
 
         left.addWidget(self._slider_group("Glass", _SLIDERS))
         left.addWidget(self._slider_group("Front face", _GEOMETRY_SLIDERS))
+        left.addWidget(self._slider_group("Shatter", _SHATTER_SLIDERS))
         right.addWidget(self._slider_group("Camera", _CAMERA_SLIDERS))
         right.addWidget(self._slider_group("Sky", _SKY_SLIDERS))
 
