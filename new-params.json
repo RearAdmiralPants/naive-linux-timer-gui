@@ -1,0 +1,50 @@
+{
+  "light_x": 2.87,
+  "light_y": 2.25,
+  "light_z": 3.29,
+  "spec_power": 9.45,
+  "spec_strength": 1.26,
+  "fresnel": 0.37,
+  "glow": 1.69,
+  "etch": 0.63,
+  "etch_depth": 10.14,
+  "base_alpha": 0.12,
+  "glass_color": [
+    0.2,
+    0.2,
+    0.2
+  ],
+  "text_color": [
+    0.6666666666666666,
+    0.0,
+    0.0
+  ],
+  "light_color": [
+    0.8666666666666667,
+    0.8666666666666667,
+    0.6
+  ],
+  "font_family": "monospace",
+  "font_bold": true,
+  "front_subdiv": 2.0,
+  "front_bulge": 0.78,
+  "orbit_speed": 0.03,
+  "orbit_radius": 2.86,
+  "orbit_height": -0.2,
+  "sway_degrees": 7.3,
+  "orbit_bob": 0.43,
+  "idle_spin": 0.08,
+  "nebula": 1.17,
+  "nebula_color_a": [
+    0.1,
+    0.16,
+    0.42
+  ],
+  "nebula_color_b": [
+    0.42,
+    0.13,
+    0.34
+  ],
+  "star_density": 178.29,
+  "star_brightness": 1.76
+}
