@@ -1,0 +1,2 @@
+- "Shards" -> "chunks" (?) Tesselate the glass into a grid, rather than a pie
+- Bulge/subdivisions: Smoothing is strange - check TODO for spherical cross-section thought

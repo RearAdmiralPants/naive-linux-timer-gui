@@ -90,6 +90,9 @@ _GEOMETRY_SLIDERS = [
 _SHATTER_SLIDERS = [
     ("gravity", 0.0, 2.0),          # g: 0 drifts flat, 1 the tuned fall, 2 heavy
     ("shatter_clear_s", 1.0, 20.0), # seconds the pieces are drawn before clearing
+    # Piece count. Integer scale (like front_subdiv) so it steps in whole
+    # wedges. Retessellates on change: cheap up to ~32, a brief hitch beyond.
+    ("shard_count", 3.0, 64.0, 1),
 ]
 
 _SKY_SLIDERS = [
@@ -149,6 +152,10 @@ class TuningPanel(QWidget):
         outer = QVBoxLayout(self)
         self._labels: dict[str, QLabel] = {}
         self._sliders: dict[str, QSlider] = {}
+        # Per-slider int<->float scale. Most sliders use 100; the integer ones
+        # (front_subdiv, shard_count) use 1. _sync_widgets needs it to avoid
+        # setting an integer slider to value*100 and clamping to its max.
+        self._scales: dict[str, int] = {}
 
         # Two columns so the panel stops overflowing the screen. The split is
         # semantic, not just arithmetic: the left column is how the shard
@@ -245,6 +252,7 @@ class TuningPanel(QWidget):
             label = QLabel(f"{getattr(self._params, name):.2f}")
             self._labels[name] = label
             self._sliders[name] = slider
+            self._scales[name] = scale
             slider.valueChanged.connect(
                 lambda v, n=name, s=scale: self._on_slider(n, v / s)
             )
@@ -347,7 +355,7 @@ class TuningPanel(QWidget):
         for name, slider in self._sliders.items():
             value = getattr(self._params, name)
             slider.blockSignals(True)
-            slider.setValue(int(value * 100))
+            slider.setValue(int(round(value * self._scales[name])))
             slider.blockSignals(False)
             self._labels[name].setText(f"{value:.2f}")
 

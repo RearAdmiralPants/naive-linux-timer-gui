@@ -107,6 +107,45 @@ _OUTLINE = [
     (-0.82, -0.54),
 ]
 
+# The silhouette can be regenerated at other vertex counts (the shard_count
+# param) so the shard breaks into more or fewer pieces -- one wedge per edge.
+# The lower bound is the smallest closed polygon; the upper bound is where the
+# one-time retessellation cost on a slider drag stops being worth it, and where
+# the wedges get too thin to read as glass anyway (see the perf notes in the
+# tuning panel).
+_SHARD_COUNT_MIN = 3
+_SHARD_COUNT_MAX = 64
+
+
+def _make_outline(n: int) -> list:
+    """An irregular ``n``-vertex polygon on roughly the unit circle.
+
+    Same spirit as ``_OUTLINE``: evenly spaced points would read as a gem, so
+    each vertex is nudged in angle and radius by a deterministic hash. Stable
+    for a given ``n`` -- the geometry and its bounds are built in separate
+    passes that must agree, and a hot rebuild must not reshuffle the shape.
+    """
+    pts = []
+    for i in range(n):
+        # Wobble the angle by up to ~1/4 of a step -- never enough to reorder
+        # neighbours -- and the radius by about +/-8%.
+        ang = 2.0 * math.pi * (i + 0.5 * (_hash01(i, 21) - 0.5)) / n
+        r = 1.0 + 0.16 * (_hash01(i, 22) - 0.5)
+        pts.append((r * math.cos(ang), r * math.sin(ang)))
+    return pts
+
+
+def _outline_for(count) -> list:
+    """The shard silhouette for a given piece count, clamped to a sane range.
+
+    ``count == 6`` returns the authored ``_OUTLINE`` unchanged, so the default
+    look is byte-for-byte what it was; any other count is synthesized.
+    """
+    n = max(_SHARD_COUNT_MIN, min(_SHARD_COUNT_MAX, int(round(count))))
+    if n == len(_OUTLINE):
+        return _OUTLINE
+    return _make_outline(n)
+
 # The shard is a solid, not a flat fan. Cross-section through one edge:
 #
 #            apex                     <- _PEAK_Z, front face peak
@@ -230,6 +269,12 @@ class ShardParams:
     # Stopwatch, how long the Reset shatter runs before it reassembles at zero.
     gravity: float = 1.0
     shatter_clear_s: float = 5.5
+
+    # How many pieces the shard breaks into: one wedge per silhouette edge, so
+    # this also shapes the intact outline. 6 keeps the authored default; other
+    # counts synthesize an irregular polygon. Like front_subdiv, changing it
+    # retessellates rather than setting a uniform (see _geometry_dirty).
+    shard_count: float = 6.0
 
     # Front-face curvature. Unlike everything above, these two rebuild the
     # vertex buffer rather than setting a uniform -- see _geometry_dirty.
@@ -638,7 +683,7 @@ def _wedge_rigid_body(i: int, corners) -> tuple:
     return centre, velocity, axis
 
 
-def _wedge_bounds(data: array.array) -> list:
+def _wedge_bounds(data: array.array, n_wedges: int) -> list:
     """Per-wedge (centre, launch velocity, radius) read back from the buffer.
 
     A wedge's vertices are one contiguous block, and its pivot centre and
@@ -650,11 +695,11 @@ def _wedge_bounds(data: array.array) -> list:
     centre contains the wedge no matter how far it has tumbled: exactly what the
     early-clear frustum test needs, with no per-vertex work at check time.
 
-    Returns ``[(centre, velocity, radius), ...]``, one entry per wedge, in the
-    shard's rest frame (the idle-spin at the break is applied later).
+    ``n_wedges`` is the piece count the buffer was built with (one per outline
+    edge). Returns ``[(centre, velocity, radius), ...]``, one entry per wedge,
+    in the shard's rest frame (the idle-spin at the break is applied later).
     """
     stride = _FLOATS_PER_VERTEX
-    n_wedges = len(_OUTLINE)
     total_verts = len(data) // stride
     verts_per_wedge = total_verts // n_wedges
     bounds = []
@@ -673,7 +718,7 @@ def _wedge_bounds(data: array.array) -> list:
     return bounds
 
 
-def _build_geometry(subdiv: int = 0, bulge: float = 0.0) -> array.array:
+def _build_geometry(subdiv: int = 0, bulge: float = 0.0, outline=None) -> array.array:
     """Extrude the outline into a solid, one wedge per edge.
 
     Each wedge contributes a front face, a front bevel, a side wall, a back
@@ -681,17 +726,20 @@ def _build_geometry(subdiv: int = 0, bulge: float = 0.0) -> array.array:
     makes a wedge a real chunk: the whole solid piece tumbles together, rather
     than the front skin peeling off its own side wall.
 
-    ``subdiv`` and ``bulge`` curve the front face. Defaults reproduce the
-    original six flat triangles byte for byte.
+    ``subdiv`` and ``bulge`` curve the front face. ``outline`` chooses the
+    silhouette (and thus the piece count); it defaults to ``_OUTLINE``. Defaults
+    reproduce the original six flat triangles byte for byte.
 
     Interleaved per vertex:
         pos(3) normal(3) uv(2) pieceCenter(3) pieceVel(3) pieceAxis(3) = 17
     """
+    if outline is None:
+        outline = _OUTLINE
     data = array.array("f")
     apex_z = _front_profile_z(0.0, 0.0, 0.0, bulge)
     front_apex = (0.0, 0.0, apex_z)
     back_apex = (0.0, 0.0, -_THICKNESS - _BACK_PEAK_Z)
-    n = len(_OUTLINE)
+    n = len(outline)
 
     # Front caps first, in their own pass: the vertex normals are averaged
     # across wedge boundaries, so no wedge can be emitted until every wedge's
@@ -699,8 +747,8 @@ def _build_geometry(subdiv: int = 0, bulge: float = 0.0) -> array.array:
     patches = []
     accum: dict = {}
     for i in range(n):
-        ax, ay = _OUTLINE[i]
-        bx, by = _OUTLINE[(i + 1) % n]
+        ax, ay = outline[i]
+        bx, by = outline[(i + 1) % n]
         rings, slot_normals = _front_patch(
             (ax * _BEVEL_INSET, ay * _BEVEL_INSET, _BEVEL_Z),
             (bx * _BEVEL_INSET, by * _BEVEL_INSET, _BEVEL_Z),
@@ -714,8 +762,8 @@ def _build_geometry(subdiv: int = 0, bulge: float = 0.0) -> array.array:
     cap_normals = _resolve_normals(accum)
 
     for i in range(n):
-        ax, ay = _OUTLINE[i]
-        bx, by = _OUTLINE[(i + 1) % n]
+        ax, ay = outline[i]
+        bx, by = outline[(i + 1) % n]
         rings = patches[i]
 
         rim_a = (ax, ay, 0.0)
@@ -1103,15 +1151,16 @@ class ShardWidget(QOpenGLWidget):
         """
         subdiv = max(0, min(_FRONT_SUBDIV_MAX, int(round(self.params.front_subdiv))))
         bulge = max(0.0, min(1.0, float(self.params.front_bulge)))
-        key = (subdiv, bulge)
+        outline = _outline_for(self.params.shard_count)
+        key = (subdiv, bulge, len(outline))
         if key == self._geometry_key:
             return False
 
         self._geometry_key = key
-        self._vertex_data = _build_geometry(subdiv, bulge)
+        self._vertex_data = _build_geometry(subdiv, bulge, outline)
         self._vertex_count = len(self._vertex_data) // _FLOATS_PER_VERTEX
         self._geometry_dirty = True
-        self._wedge_bounds = _wedge_bounds(self._vertex_data)
+        self._wedge_bounds = _wedge_bounds(self._vertex_data, len(outline))
         return True
 
     # -- shader loading ---------------------------------------------------

@@ -399,7 +399,7 @@ class NoGlTest(unittest.TestCase):
         )
 
         data = _build_geometry()
-        bounds = _wedge_bounds(data)
+        bounds = _wedge_bounds(data, len(_OUTLINE))
         self.assertEqual(len(bounds), len(_OUTLINE))
 
         verts_per_wedge = (len(data) // stride) // len(_OUTLINE)
@@ -413,6 +413,35 @@ class NoGlTest(unittest.TestCase):
                     d, radius + 1e-6,
                     f"wedge {wedge} vertex {v} sits outside its bounding radius",
                 )
+
+    def test_shard_count_reshapes_geometry_and_bounds(self):
+        """shard_count drives the outline, the piece count, and the bounds.
+
+        The default (6) must stay byte-identical to the authored outline; other
+        counts synthesize a polygon, build without error, and produce exactly
+        that many wedges. Out-of-range values clamp rather than explode.
+        """
+        from naive_timer.shard import (
+            _FLOATS_PER_VERTEX as stride,
+            _OUTLINE, _SHARD_COUNT_MAX, _SHARD_COUNT_MIN,
+            _build_geometry, _make_outline, _outline_for, _wedge_bounds,
+        )
+
+        self.assertIs(_outline_for(6), _OUTLINE, "count 6 keeps the authored look")
+        self.assertEqual(len(_outline_for(10 ** 6)), _SHARD_COUNT_MAX)
+        self.assertEqual(len(_outline_for(0)), _SHARD_COUNT_MIN)
+
+        # Deterministic: same count must give the same polygon every time, or
+        # the geometry and its separately-built bounds would disagree.
+        self.assertEqual(_make_outline(11), _make_outline(11))
+
+        for count in (_SHARD_COUNT_MIN, 5, 12, _SHARD_COUNT_MAX):
+            outline = _outline_for(count)
+            self.assertEqual(len(outline), count)
+            data = _build_geometry(0, 0.0, outline)
+            verts = len(data) // stride
+            self.assertEqual(verts % count, 0, "wedges must be equal-sized blocks")
+            self.assertEqual(len(_wedge_bounds(data, count)), count)
 
     def test_frustum_test_distinguishes_on_and_off_screen(self):
         """The bounding-sphere frustum test is the heart of early-clear.
