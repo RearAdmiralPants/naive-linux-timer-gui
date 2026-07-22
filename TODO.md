@@ -8,6 +8,7 @@
 	- Suggestions?
 
 - Prettier
+	- Front-complexity: begun, strange dashes on vertices; may wish to revisit entire strategy (sphere cross-section vs. smoothly-extruded-hexagon)
 	- Antialiasing?
 		- Not necessarily whole-scene; font?
 	- Frosted effects
