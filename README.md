@@ -17,6 +17,7 @@ and verified without a display; the Qt layer is a thin view on top.
 - **Duration** mode: count down a timespan — `12m`, `1h30m`, `90s`, or `25:00`
 - **Alarm at** mode: count down to a clock time — `02:54`, `14:00`, `6:30pm`
   (rolls to tomorrow if the time has already passed today)
+- Or start a countdown straight from the shell: `naive-timer --timer 30m`
 - On reaching zero: a visual flash plus a gentle chime that loops quietly for
   ~2 minutes (configurable) or until you hit **Dismiss**
 - The chime is synthesized at runtime (no binary asset); point it at your own
@@ -89,6 +90,24 @@ application and puts the entry point on your `PATH`:
 pipx install .
 naive-timer
 ```
+
+## Starting a timer from the command line
+
+Kick off a countdown without touching the GUI:
+
+```bash
+naive-timer --timer 30m                       # 30 minutes
+naive-timer --timer 1h30m                     # 1.5 hours
+naive-timer --timer 25:00                     # 25 minutes (mm:ss)
+naive-timer --timer 6:30pm                    # alarm at 6:30 PM
+naive-timer --timer 10m --json green-nebula.json   # timer + custom look
+```
+
+The app opens on the Timer tab with the countdown already running, as though the
+value had been typed into the text box and **Start** clicked. The value is parsed
+as a duration first (`12m`, `1h30m`, `25:00`, bare number = minutes), then as an
+alarm time (`02:54`, `6:30pm`) — the same parser the Timer tab uses. If neither
+works, an error is written to stderr and the app exits without opening.
 
 ## Develop / test
 
