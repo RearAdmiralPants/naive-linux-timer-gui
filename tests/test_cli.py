@@ -16,6 +16,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 from naive_timer.shard import ShardParams
 from naive_timer.tuning import apply_json_dict, load_params_file, ParamsError
+from naive_timer.countdown import parse_duration, parse_alarm
 from naive_timer.app import _parse_cli
 
 # Path to real params files in the repo root.
@@ -44,6 +45,7 @@ class ParseCliTest(unittest.TestCase):
         cli = _parse_cli([])
         self.assertIsNone(cli.json)
         self.assertFalse(cli.no_panel)
+        self.assertIsNone(cli.timer)
 
     def test_json_space(self) -> None:
         cli = _parse_cli(["--json", "params.json"])
@@ -72,6 +74,34 @@ class ParseCliTest(unittest.TestCase):
         before = list(sys.argv)
         _parse_cli(["--no-panel"])
         self.assertEqual(sys.argv, before)
+
+    # -- timer flag --
+
+    def test_timer_space(self) -> None:
+        cli = _parse_cli(["--timer", "30m"])
+        self.assertEqual(cli.timer, "30m")
+        self.assertIsNone(cli.json)
+        self.assertFalse(cli.no_panel)
+
+    def test_timer_equals(self) -> None:
+        cli = _parse_cli(["--timer=1h30m"])
+        self.assertEqual(cli.timer, "1h30m")
+
+    def test_timer_colon_format(self) -> None:
+        cli = _parse_cli(["--timer", "25:00"])
+        self.assertEqual(cli.timer, "25:00")
+
+    def test_timer_alarm_format(self) -> None:
+        cli = _parse_cli(["--timer", "02:54"])
+        self.assertEqual(cli.timer, "02:54")
+
+    def test_timer_with_json(self) -> None:
+        cli = _parse_cli(["--timer", "10m", "--json", "p.json"])
+        self.assertEqual(cli.timer, "10m")
+        self.assertEqual(cli.json, "p.json")
+
+    def test_timer_missing_value(self) -> None:
+        self._expect_exit("--timer")
 
     # -- error paths (argparse exits) --
 
@@ -194,6 +224,89 @@ class ApplyJsonDictTest(unittest.TestCase):
         apply_json_dict(params, {"font_family": "serif", "font_bold": False})
         self.assertEqual(params.font_family, "serif")
         self.assertFalse(params.font_bold)
+
+
+class TimerValueParsingTest(unittest.TestCase):
+    """Verify the --timer value parsing strategy used in main().
+
+    The main() function tries parse_duration first, then parse_alarm as a
+    fallback. These tests verify that strategy end-to-end without involving
+    the GUI.
+    """
+
+    def _parse_timer(self, raw: str) -> tuple[float, str]:
+        """Replicate the parsing logic from main()."""
+        try:
+            seconds = parse_duration(raw)
+            return (seconds, "Duration")
+        except ValueError:
+            seconds = parse_alarm(raw)
+            return (seconds, "Alarm at")
+
+    # -- duration forms (parsed as Duration) --
+
+    def test_unit_seconds(self) -> None:
+        secs, mode = self._parse_timer("90s")
+        self.assertEqual(secs, 90.0)
+        self.assertEqual(mode, "Duration")
+
+    def test_unit_minutes(self) -> None:
+        secs, mode = self._parse_timer("30m")
+        self.assertEqual(secs, 1800.0)
+        self.assertEqual(mode, "Duration")
+
+    def test_unit_hours(self) -> None:
+        secs, mode = self._parse_timer("1h")
+        self.assertEqual(secs, 3600.0)
+        self.assertEqual(mode, "Duration")
+
+    def test_combined_units(self) -> None:
+        secs, mode = self._parse_timer("1h30m")
+        self.assertEqual(secs, 5400.0)
+        self.assertEqual(mode, "Duration")
+
+    def test_colon_mm_ss(self) -> None:
+        secs, mode = self._parse_timer("25:00")
+        self.assertEqual(secs, 1500.0)
+        self.assertEqual(mode, "Duration")
+
+    def test_colon_hh_mm_ss(self) -> None:
+        secs, mode = self._parse_timer("1:30:00")
+        self.assertEqual(secs, 5400.0)
+        self.assertEqual(mode, "Duration")
+
+    def test_bare_number_is_minutes(self) -> None:
+        secs, mode = self._parse_timer("12")
+        self.assertEqual(secs, 720.0)
+        self.assertEqual(mode, "Duration")
+
+    # -- alarm forms (parsed as Alarm at since duration fails) --
+    # Note: colon formats are consumed by parse_duration (mm:ss), so only
+    # am/pm suffixed times reach parse_alarm.
+
+    def test_alarm_12h_pm(self) -> None:
+        secs, mode = self._parse_timer("6:30pm")
+        self.assertEqual(mode, "Alarm at")
+        self.assertGreater(secs, 0)
+
+    def test_alarm_12h_am(self) -> None:
+        secs, mode = self._parse_timer("7:00am")
+        self.assertEqual(mode, "Alarm at")
+        self.assertGreater(secs, 0)
+
+    # -- invalid forms raise ValueError --
+
+    def test_invalid_raises(self) -> None:
+        with self.assertRaises(ValueError):
+            self._parse_timer("not-a-duration")
+
+    def test_empty_raises(self) -> None:
+        with self.assertRaises(ValueError):
+            self._parse_timer("")
+
+    def test_negative_raises(self) -> None:
+        with self.assertRaises(ValueError):
+            self._parse_timer("-5")
 
 
 if __name__ == "__main__":

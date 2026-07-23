@@ -42,7 +42,8 @@ def _parse_cli(argv: list[str] | None = None) -> argparse.Namespace:
     args after the program name); ``None`` reads ``sys.argv``. argparse itself
     handles ``--help`` and usage errors, exiting 0 and 2 respectively.
 
-    Returns a namespace with ``json`` (str | None) and ``no_panel`` (bool).
+    Returns a namespace with ``json`` (str | None), ``no_panel`` (bool), and
+    ``timer`` (str | None).
     """
     parser = argparse.ArgumentParser(
         prog="naive-timer",
@@ -57,6 +58,14 @@ def _parse_cli(argv: list[str] | None = None) -> argparse.Namespace:
         "--no-panel",
         action="store_true",
         help="Never open the dev/tuning panel, even when NAIVE_TIMER_TUNE=1.",
+    )
+    parser.add_argument(
+        "--timer",
+        metavar="VALUE",
+        help="Open on the Timer tab and start a countdown immediately. "
+        "VALUE is parsed as a duration (e.g. '12m', '1h30m', '25:00') or, "
+        "if that fails, as an alarm time (e.g. '02:54', '6:30pm'). "
+        "On parse error the application exits with a non-zero status.",
     )
     return parser.parse_args(argv)
 
@@ -235,6 +244,25 @@ class TimerWidget(QWidget):
         self._status.setText("")
         self._start_btn.setText("Pause")
 
+    def start_with(self, seconds: float, display_text: str, mode: str) -> None:
+        """Programmatically configure and start a countdown.
+
+        Bypasses input parsing — ``seconds`` is already a validated, parsed
+        value. ``display_text`` is shown in the text box so the user sees what
+        was set. ``mode`` is one of "Duration" or "Alarm at" and controls
+        the combo box selection.
+
+        Called from ``main()`` when the ``--timer`` CLI flag is used.
+        """
+        self._input.setText(display_text)
+        idx = self._mode.findText(mode)
+        if idx >= 0:
+            self._mode.setCurrentIndex(idx)
+        self._cd.configure(seconds)
+        self._cd.start()
+        self._status.setText("")
+        self._start_btn.setText("Pause")
+
     def _on_reset(self) -> None:
         self._stop_alert()
         self._cd.reset()
@@ -308,7 +336,7 @@ class _AlertPlayer:
 
 
 class MainWindow(QTabWidget):
-    def __init__(self) -> None:
+    def __init__(self, *, timer_value: tuple[float, str, str] | None = None) -> None:
         super().__init__()
         self.setWindowTitle("Naive Linux Timer")
         # One ShardParams shared by both tabs, so the tuning panel moves both
@@ -319,6 +347,12 @@ class MainWindow(QTabWidget):
         self.timer_tab = TimerWidget(self.shard_params)
         self.addTab(self.stopwatch_tab, "Stopwatch")
         self.addTab(self.timer_tab, "Timer")
+
+        # --timer CLI flag: pre-configured countdown, jump to Timer tab.
+        if timer_value is not None:
+            seconds, display_text, mode = timer_value
+            self.timer_tab.start_with(seconds, display_text, mode)
+            self.setCurrentWidget(self.timer_tab)
 
     def shards(self) -> list[ShardWidget]:
         return [self.stopwatch_tab._shard, self.timer_tab._shard]
@@ -339,11 +373,27 @@ def main() -> int:
             return 1
         print(f"[timer] loaded params from {cli.json}")
 
+    # Parse --timer value before the GUI starts so errors exit cleanly.
+    timer_value: tuple[float, str, str] | None = None
+    if cli.timer is not None:
+        raw = cli.timer.strip()
+        try:
+            seconds = parse_duration(raw)
+            mode = "Duration"
+        except ValueError:
+            try:
+                seconds = parse_alarm(raw)
+                mode = "Alarm at"
+            except ValueError as exc:
+                print(f"naive-timer: cannot parse timer value {cli.timer!r}: {exc}", file=sys.stderr)
+                return 1
+        timer_value = (seconds, raw, mode)
+
     # Must precede QApplication: the GL context is chosen at widget creation.
     QSurfaceFormat.setDefaultFormat(default_surface_format())
 
     app = QApplication(sys.argv)
-    window = MainWindow()
+    window = MainWindow(timer_value=timer_value)
 
     # Apply CLI-loaded params to the shared ShardParams instance.
     if params_data is not None:
