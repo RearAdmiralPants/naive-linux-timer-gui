@@ -12,6 +12,7 @@ from __future__ import annotations
 import dataclasses
 import json
 import os
+from pathlib import Path
 
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QFont
@@ -63,6 +64,34 @@ def apply_json_dict(params: ShardParams, data: dict) -> None:
         if isinstance(getattr(params, name), tuple):
             value = tuple(value)
         setattr(params, name, value)
+
+
+class ParamsError(Exception):
+    """A shard-params file could not be read or was malformed."""
+
+
+def load_params_file(path: str) -> dict:
+    """Read and validate a shard-params JSON file, returning the parsed object.
+
+    The single source of truth for loading a params file, shared by the CLI,
+    the Load button and the startup auto-load. Raises ``ParamsError`` with a
+    human-readable message on any failure -- missing path, non-file, invalid
+    JSON, or a top-level value that is not a JSON object -- and each caller
+    decides how loudly to report it.
+    """
+    p = Path(path)
+    if not p.exists():
+        raise ParamsError(f"file not found: {path}")
+    if not p.is_file():
+        raise ParamsError(f"not a file: {path}")
+    try:
+        with open(p, encoding="utf-8") as fh:
+            data = json.load(fh)
+    except (OSError, ValueError) as exc:
+        raise ParamsError(f"failed to load {path}: {exc}") from None
+    if not isinstance(data, dict):
+        raise ParamsError(f"expected a JSON object at the top level in {path}")
+    return data
 
 
 # name, minimum, maximum  (floats, scaled by 100 through the int slider)
@@ -296,9 +325,8 @@ class TuningPanel(QWidget):
             return
         self._settings_path = path
         try:
-            with open(path) as fh:
-                data = json.load(fh)
-        except (OSError, ValueError) as exc:
+            data = load_params_file(path)
+        except ParamsError as exc:
             QMessageBox.warning(self, "Load failed", str(exc))
             return
 
@@ -326,9 +354,8 @@ class TuningPanel(QWidget):
         if not os.path.exists(path):
             return
         try:
-            with open(path) as fh:
-                data = json.load(fh)
-        except (OSError, ValueError) as exc:
+            data = load_params_file(path)
+        except ParamsError as exc:
             # A broken dev file must not stop the app from starting; a console
             # note is enough, and a modal on launch would just be in the way.
             print(f"[tuning] ignoring {path}: {exc}")

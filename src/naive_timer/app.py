@@ -9,6 +9,7 @@ Run with:  python -m naive_timer
 
 from __future__ import annotations
 
+import argparse
 import sys
 
 from PySide6.QtCore import Qt, QElapsedTimer, QTimer, QUrl
@@ -32,6 +33,33 @@ from . import sound, tuning
 
 # ~60 FPS refresh for smooth animation.
 FRAME_MS = 16
+
+
+def _parse_cli(argv: list[str] | None = None) -> argparse.Namespace:
+    """Parse command-line arguments.
+
+    Pure with respect to process state: tests pass an explicit ``argv`` (the
+    args after the program name); ``None`` reads ``sys.argv``. argparse itself
+    handles ``--help`` and usage errors, exiting 0 and 2 respectively.
+
+    Returns a namespace with ``json`` (str | None) and ``no_panel`` (bool).
+    """
+    parser = argparse.ArgumentParser(
+        prog="naive-timer",
+        description="A visually-appealing Linux stopwatch/timer.",
+    )
+    parser.add_argument(
+        "--json",
+        metavar="FILE",
+        help="Load shard parameters from a JSON file and apply them on startup.",
+    )
+    parser.add_argument(
+        "--no-panel",
+        action="store_true",
+        help="Never open the dev/tuning panel, even when NAIVE_TIMER_TUNE=1.",
+    )
+    return parser.parse_args(argv)
+
 
 # Longest step we will hand the animation in one frame. A stall, a drag of the
 # window, or a laptop resume can leave an arbitrarily large gap; without a clamp
@@ -297,16 +325,40 @@ class MainWindow(QTabWidget):
 
 
 def main() -> int:
+    # Parse CLI args before QApplication. argparse handles --help and usage
+    # errors itself (exiting 0 / 2); we only handle our own concerns below.
+    cli = _parse_cli()
+
+    # Load JSON params if requested, before building any GL widgets.
+    params_data: dict | None = None
+    if cli.json is not None:
+        try:
+            params_data = tuning.load_params_file(cli.json)
+        except tuning.ParamsError as exc:
+            print(f"naive-timer: {exc}", file=sys.stderr)
+            return 1
+        print(f"[timer] loaded params from {cli.json}")
+
     # Must precede QApplication: the GL context is chosen at widget creation.
     QSurfaceFormat.setDefaultFormat(default_surface_format())
 
     app = QApplication(sys.argv)
     window = MainWindow()
+
+    # Apply CLI-loaded params to the shared ShardParams instance.
+    if params_data is not None:
+        tuning.apply_json_dict(window.shard_params, params_data)
+        # Refresh both shards so the new params take effect immediately.
+        for shard in window.shards():
+            shard.refresh_params()
+
     window.resize(420, 620)
     window.show()
 
-    panel = None
-    if tuning.enabled():
+    # The dev/tuning panel is opt-in via NAIVE_TIMER_TUNE, and --no-panel
+    # suppresses it -- e.g. to load a look cleanly without the debug window,
+    # or to load one and keep tweaking it (env set, --no-panel absent).
+    if tuning.enabled() and not cli.no_panel:
         panel = tuning.TuningPanel(window.shards())
         panel.show()
 

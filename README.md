@@ -135,6 +135,22 @@ specular power, Fresnel, glow, and an etched↔emissive blend — plus font and
 colour pickers. **Print params** dumps the current values to the console in a
 form you can paste back into `ShardParams`.
 
+A look saved from that panel is just a JSON file, and `--json` loads one at
+startup — the shard wears it from the first frame:
+
+```bash
+./launch.sh --json green-nebula.json          # load a saved look
+./launch.sh --no-panel                         # tuning env set, but no panel
+NAIVE_TIMER_TUNE=1 ./launch.sh --json green-nebula.json  # load it, then tweak
+```
+
+`--json` only loads params; it no longer touches the panel. The panel is
+governed solely by `NAIVE_TIMER_TUNE`, and `--no-panel` forces it off — so you
+can load a look for a clean screenshot, or load one as a starting point and keep
+dragging sliders. Run `naive-timer --help` for the full list. (Unknown keys in
+the file are ignored, so a look saved by an older or newer build still loads what
+it can.)
+
 ## Layout
 
 ```
@@ -148,6 +164,7 @@ tests/
   test_stopwatch.py
   test_countdown.py
   test_sound.py
+  test_cli.py        # CLI parsing + JSON param loading (headless, no Qt)
   test_gui_smoke.py  # constructs the Qt widgets offscreen (needs PySide6)
 ```
 
