@@ -8,6 +8,8 @@ and verified without a display; the Qt layer is a thin view on top.
 
 ## Features
 
+**Stay-on-top toggle**: A simple checkbox keeps the window on top
+
 **Stopwatch tab**
 - Start / pause / resume / reset stopwatch
 - `HH:MM:SS.cs` readout at ~60 FPS

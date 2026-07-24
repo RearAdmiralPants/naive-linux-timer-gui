@@ -23,6 +23,7 @@ Bare ``python -m unittest discover -s tests`` skips the GL tier and says so.
 
 import math
 import os
+import time
 import unittest
 
 # Must be set before any QApplication is created. Respect an existing DISPLAY:
@@ -96,6 +97,29 @@ class NoGlTest(unittest.TestCase):
         self.assertEqual(
             player._effect.loopCount(), QSoundEffect.Loop.Infinite.value
         )
+
+    def test_the_x11_event_struct_matches_the_c_layout(self):
+        """A wrong ctypes layout corrupts the message with no error anywhere.
+
+        The first implementation declared the ``data`` union as ``c_int32 * 5``.
+        On LP64 it is ``long l[5]``, so every field after the first landed at
+        the wrong offset: XSendEvent still returned success and the window
+        manager silently ignored the request. Sizes are the only cheap way to
+        pin this down, and they need neither a display nor a WM.
+        """
+        import ctypes
+
+        from naive_timer.app import _XEvent
+
+        # sizeof(XEvent): a union padded to `long pad[24]`.
+        self.assertEqual(ctypes.sizeof(_XEvent), 24 * ctypes.sizeof(ctypes.c_long))
+
+        fields = dict(_XEvent._fields_)
+        self.assertEqual(fields["data"]._type_, ctypes.c_long)
+        self.assertEqual(ctypes.sizeof(fields["data"]), 5 * ctypes.sizeof(ctypes.c_long))
+
+        # data must start where C puts it: after `format` plus its alignment pad.
+        self.assertEqual(_XEvent.data.offset, 7 * ctypes.sizeof(ctypes.c_long))
 
     def test_geometry_is_a_solid_of_flat_shaded_facets(self):
         from naive_timer.shard import (
@@ -830,6 +854,64 @@ class GlTest(unittest.TestCase):
         window = MainWindow()
         window.show()
         self.assertTrue(window.windowTitle())
+
+    def test_stay_on_top_reaches_the_window_manager(self):
+        """The checkbox must change the WM's mind, not merely send a message.
+
+        The first implementation sent a malformed ClientMessage with the wrong
+        event mask: XSendEvent returned success, the WM ignored it, and the
+        checkbox silently did nothing. Only reading _NET_WM_STATE back from the
+        WM catches that -- so this asserts on the state, not on a return value.
+
+        Skips where there is no window manager to ask (xvfb, offscreen,
+        Wayland-native), which is also exactly when the checkbox is disabled.
+        """
+        from PySide6.QtWidgets import QApplication
+
+        from naive_timer.app import MainWindow, stay_on_top
+
+        above = stay_on_top()
+        if not above.available:
+            self.skipTest(f"stay-on-top unavailable: {above.reason}")
+
+        window = MainWindow()
+        window.show()
+        QApplication.processEvents()
+        window_id = int(window.winId())
+
+        # A _NET_WM_STATE ClientMessage is only honoured once mapped.
+        deadline = time.monotonic() + 5.0
+        while not window.isVisible() and time.monotonic() < deadline:
+            QApplication.processEvents()
+            time.sleep(0.02)
+
+        def wait_for_above(want: bool) -> bool:
+            end = time.monotonic() + 5.0
+            while time.monotonic() < end:
+                QApplication.processEvents()
+                if above.is_above(window_id) == want:
+                    return True
+                time.sleep(0.05)
+            return False
+
+        self.assertTrue(window._stay_on_top.isEnabled())
+
+        window._stay_on_top.setChecked(True)
+        self.assertTrue(
+            wait_for_above(True),
+            "the WM never added _NET_WM_STATE_ABOVE",
+        )
+
+        window._stay_on_top.setChecked(False)
+        self.assertTrue(
+            wait_for_above(False),
+            "the WM never removed _NET_WM_STATE_ABOVE",
+        )
+
+        # The EWMH path must leave the window alone: Qt's setWindowFlags path
+        # destroyed and never remapped it, which is why this one exists.
+        self.assertEqual(int(window.winId()), window_id, "the window was recreated")
+        self.assertTrue(window.isVisible())
 
     def test_shatter_starts_from_the_current_pose(self):
         """The shard must not snap back to its rest angle as it breaks."""
