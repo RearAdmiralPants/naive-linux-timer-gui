@@ -409,7 +409,10 @@ def main() -> int:
     # suppresses it -- e.g. to load a look cleanly without the debug window,
     # or to load one and keep tweaking it (env set, --no-panel absent).
     if tuning.enabled() and not cli.no_panel:
-        panel = tuning.TuningPanel(window.shards())
+        panel = tuning.TuningPanel(
+            window.shards(),
+            skip_autoload=cli.json is not None,
+        )
         panel.show()
 
     return app.exec()

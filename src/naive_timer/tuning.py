@@ -163,7 +163,7 @@ class _HexColorEdit(QLineEdit):
 class TuningPanel(QWidget):
     """Drives every shard at once; they share one ShardParams."""
 
-    def __init__(self, shards: list[ShardWidget]) -> None:
+    def __init__(self, shards: list[ShardWidget], *, skip_autoload: bool = False) -> None:
         super().__init__()
         if isinstance(shards, ShardWidget):  # tolerate a single shard
             shards = [shards]
@@ -261,7 +261,10 @@ class TuningPanel(QWidget):
         outer.addLayout(buttons)
 
         # Every control now exists, so a startup file can drive them all.
-        self._autoload()
+        # Skip autoload when --json was used: the explicit CLI params take
+        # precedence over the implicit default-params.json.
+        if not skip_autoload:
+            self._autoload()
 
     def _slider_group(self, title: str, specs) -> QGroupBox:
         box = QGroupBox(title)
