@@ -1161,6 +1161,7 @@ class ShardWidget(QOpenGLWidget):
                 "uTextColor",
                 "uSpecPower", "uSpecStrength", "uFresnel", "uGlow",
                 "uEtch", "uEtchDepth", "uBaseAlpha", "uAlarm", "uShatterT",
+                "uGravity",
                 "uSpin",
                 "uSpinAtBreak",
             )
