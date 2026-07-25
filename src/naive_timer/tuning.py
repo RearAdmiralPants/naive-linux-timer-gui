@@ -194,9 +194,9 @@ class TuningPanel(QWidget):
 
         left.addWidget(self._slider_group("Glass", _SLIDERS))
         left.addWidget(self._slider_group("Front face", _GEOMETRY_SLIDERS))
-        left.addWidget(self._slider_group("Shatter", _SHATTER_SLIDERS))
         right.addWidget(self._slider_group("Camera", _CAMERA_SLIDERS))
         right.addWidget(self._slider_group("Sky", _SKY_SLIDERS))
+        right.addWidget(self._slider_group("Shatter", _SHATTER_SLIDERS))
 
         appearance = QGroupBox("Numerals")
         aform = QFormLayout(appearance)
