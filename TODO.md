@@ -1,5 +1,17 @@
 # TODO
 
+- Bugs
+	- After > 45 mins, the application will segfault and dump core. "Locking" (win-L) the machine may be a cause/may be involved. There may be several different root causes. Here the output of one such crash in console:
+```
+[sky] nebula baked into 512^2 cubemap
+QSocketNotifier: Socket notifiers cannot be enabled or disabled from another thread
+QSocketNotifier: Socket notifiers cannot be enabled or disabled from another thread
+QSocketNotifier: Socket notifiers cannot be enabled or disabled from another thread
+QSocketNotifier: Socket notifiers cannot be enabled or disabled from another thread
+Segmentation fault (core dumped)
+```
+
+
 - Optimizations
 	- [x] Nebula baked into a 512^2 RG16F cubemap; stars stay procedural.
 	      4K 30ms -> 6.5ms. See docs/HANDOFF.md.
