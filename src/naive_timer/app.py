@@ -11,9 +11,10 @@ from __future__ import annotations
 
 import argparse
 import sys
+from pathlib import Path
 
 from PySide6.QtCore import Qt, QElapsedTimer, QTimer, QUrl
-from PySide6.QtGui import QSurfaceFormat
+from PySide6.QtGui import QIcon, QSurfaceFormat
 from PySide6.QtWidgets import (
     QApplication,
     QComboBox,
@@ -33,6 +34,31 @@ from . import sound, tuning
 
 # ~60 FPS refresh for smooth animation.
 FRAME_MS = 16
+
+_ICON_DIR = Path(__file__).parent / "icons"
+
+# Desktop identity. This must match the installed .desktop file's basename,
+# because that is how the panel maps a window back to its icon. Without it Qt
+# derives WM_CLASS from the interpreter, so every Python tool on the system
+# shows the same generic snake.
+APP_ID = "naive-timer"
+
+
+def _app_icon() -> QIcon:
+    """The window icon -- deliberately a single bitmap, not a multi-size set.
+
+    On xcb, Qt re-renders every entry of a multi-size QIcon at the screen's
+    device pixel ratio, so on a HiDPI display the small hand-tuned sizes come
+    back upscaled and blurry; worse, a 256px entry pushes _NET_WM_ICON past
+    X11's ~256KB property limit and the icon is dropped entirely, silently.
+    Both verified with xprop.
+
+    The crisp per-size art reaches the panel by a different route: the desktop
+    entry's Icon= key, resolved through the installed icon theme, which
+    Cinnamon prefers over _NET_WM_ICON for any window it can match to a
+    .desktop file. See tools/install-desktop.sh.
+    """
+    return QIcon(str(_ICON_DIR / "timer-icon-128.png"))
 
 
 def _parse_cli(argv: list[str] | None = None) -> argparse.Namespace:
@@ -393,6 +419,15 @@ def main() -> int:
     QSurfaceFormat.setDefaultFormat(default_surface_format())
 
     app = QApplication(sys.argv)
+
+    # Must precede window creation: WM_CLASS is stamped on the X11 window when
+    # it is created, and the panel reads it exactly once.
+    app.setApplicationName(APP_ID)
+    app.setApplicationDisplayName("Naive Timer")
+    app.setDesktopFileName(APP_ID)
+
+    app.setWindowIcon(_app_icon())
+
     window = MainWindow(timer_value=timer_value)
 
     # Apply CLI-loaded params to the shared ShardParams instance.

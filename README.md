@@ -91,6 +91,25 @@ pipx install .
 naive-timer
 ```
 
+## Menu entry and panel icon
+
+By default a Qt app started as `python -m ...` inherits its window identity from
+the interpreter, so the panel shows the generic Python icon — indistinguishable
+from every other Python tool you have running. To give it its own:
+
+```bash
+./tools/install-desktop.sh              # ~/.local/share, no root needed
+./tools/install-desktop.sh --uninstall
+```
+
+That installs the icon at every size into the `hicolor` theme and a desktop
+entry whose `StartupWMClass` matches the app's `WM_CLASS`, which is what lets
+the panel map the running window back to its icon. Already-running instances
+keep the old icon until restarted.
+
+The menu entry launches with `--no-panel` (no dev tuning window); edit the
+`Exec` line in `tools/install-desktop.sh` if you'd rather have it.
+
 ## Starting a timer from the command line
 
 Kick off a countdown without touching the GUI:
