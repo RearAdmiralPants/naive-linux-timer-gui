@@ -1,7 +1,7 @@
 # TODO
 
 - Bugs
-	- After > 45 mins, the application will segfault and dump core. "Locking" (win-L) the machine may be a cause/may be involved. There may be several different root causes. Here the output of one such crash in console:
+	- After > 45 mins, the application will segfault and dump core. "Locking" (win-L) the machine may be a cause/may be involved. There may be several different root causes. NOTE 31Jul: finally witnessed one such crash, and it occurred when my Bluetooth Headphones disconnected and the default sound output changed back from them to the local sound hardware. Here the output of one such crash in console:
 ```
 [sky] nebula baked into 512^2 cubemap
 QSocketNotifier: Socket notifiers cannot be enabled or disabled from another thread
