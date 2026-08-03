@@ -1,15 +1,13 @@
 # TODO
 
 - Bugs
-	- After > 45 mins, the application will segfault and dump core. "Locking" (win-L) the machine may be a cause/may be involved. There may be several different root causes. NOTE 31Jul: finally witnessed one such crash, and it occurred when my Bluetooth Headphones disconnected and the default sound output changed back from them to the local sound hardware. Here the output of one such crash in console:
-```
-[sky] nebula baked into 512^2 cubemap
-QSocketNotifier: Socket notifiers cannot be enabled or disabled from another thread
-QSocketNotifier: Socket notifiers cannot be enabled or disabled from another thread
-QSocketNotifier: Socket notifiers cannot be enabled or disabled from another thread
-QSocketNotifier: Socket notifiers cannot be enabled or disabled from another thread
-Segmentation fault (core dumped)
-```
+	- [x] **Random segfault after ~45 minutes.** Root-caused 3Aug from five saved
+	      core dumps: Qt 6.11's native **PipeWire audio backend** crashes the
+	      process whenever the audio sink it is attached to disappears. Nothing
+	      to do with the GL code, the lock screen, or elapsed time -- 45 minutes
+	      was just how long it took for something in the session to change the
+	      audio device list. Fixed by pinning `QT_AUDIO_BACKEND=PulseAudio` in
+	      `app.py`. See docs/HANDOFF.md for the diagnosis and the reproducer.
 
 
 - Optimizations

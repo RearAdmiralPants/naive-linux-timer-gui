@@ -12,8 +12,42 @@ from __future__ import annotations
 import argparse
 import ctypes
 import ctypes.util
+import os
 import sys
 from pathlib import Path
+
+# ---------------------------------------------------------------------------
+# Audio backend: force Qt off its PipeWire backend.  MUST precede any import
+# that can initialise QtMultimedia.
+# ---------------------------------------------------------------------------
+#
+# Qt 6.11 defaults to a native PipeWire audio backend on Linux. Against
+# PipeWire 1.0.5 (Ubuntu 24.04) that backend crashes the *whole process*
+# whenever the audio sink it is attached to disappears -- Bluetooth headphones
+# dropping, an HDMI sink going away with the monitor, a card re-profiling.
+# Two signatures, both from PipeWire's own threads, neither catchable here:
+#
+#   SIGSEGV  null deref at +0x1c in libpipewire-module-protocol-native.so
+#   SIGABRT  "corrupted size vs. prev_size" in pw_stream_new_simple, i.e. the
+#            heap was already corrupt by the time the rebuild allocated
+#
+# It needs no alarm and no user action: constructing a QSoundEffect opens a
+# stream, so an idle app that merely *might* ring later is fully exposed. This
+# is what the "segfaults after ~45 minutes" report was -- 45 minutes is just
+# how long it took for something in the session to touch the device list. The
+# four "QSocketNotifier: Socket notifiers cannot be enabled or disabled from
+# another thread" warnings that preceded each crash are the same backend, and
+# they disappear entirely under PulseAudio.
+#
+# Reproduced deterministically (crash on the first attempt, PipeWire; 20/20
+# clean, PulseAudio) by playing on a null sink and then unloading it.
+#
+# PulseAudio here means pipewire-pulse in practice -- the audio still goes
+# through PipeWire, just via a client library that survives its server
+# rearranging devices. setdefault, so `QT_AUDIO_BACKEND=PipeWire` still lets
+# you check whether a newer PipeWire has fixed it.
+if sys.platform.startswith("linux"):
+    os.environ.setdefault("QT_AUDIO_BACKEND", "PulseAudio")
 
 from PySide6.QtCore import Qt, QElapsedTimer, QTimer, QUrl
 from PySide6.QtGui import QGuiApplication, QSurfaceFormat, QIcon, QSurfaceFormat

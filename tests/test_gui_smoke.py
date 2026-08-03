@@ -83,6 +83,35 @@ class NoGlTest(unittest.TestCase):
             player._effect.loopCount(), QSoundEffect.Loop.Infinite.value
         )
 
+    def test_the_pipewire_audio_backend_is_not_in_use(self):
+        """Qt's PipeWire audio backend takes the whole process down with it.
+
+        Against PipeWire 1.0.5 (Ubuntu 24.04), Qt 6.11's native PipeWire audio
+        backend segfaults or corrupts the heap whenever the sink it is attached
+        to disappears -- Bluetooth headphones dropping, an HDMI sink leaving
+        with the monitor. Constructing a QSoundEffect is enough to be exposed;
+        nothing has to be playing. That is the "segfaults after ~45 minutes"
+        bug, and it was reproduced on the first attempt by playing to a null
+        sink and unloading it, against 20/20 clean under PulseAudio.
+
+        So ``app`` pins the backend at import. Asserting on the environment is
+        the only cheap check: which backend Qt picked is not exposed through
+        any API, and actually crashing the process to find out is not a test.
+
+        This fails if you deliberately export ``QT_AUDIO_BACKEND=PipeWire``,
+        which is the intended answer -- that is the configuration that crashes.
+        """
+        import sys
+
+        if not sys.platform.startswith("linux"):
+            self.skipTest("the PipeWire backend is Linux-only")
+
+        from naive_timer import app  # noqa: F401  -- the import is what sets it
+
+        backend = os.environ.get("QT_AUDIO_BACKEND")
+        self.assertTrue(backend, "app must pin an audio backend, not take Qt's default")
+        self.assertNotEqual(backend, "PipeWire")
+
     def test_shatter_plays_once_and_the_chime_loops(self):
         """An infinitely looping shatter would be unbearable."""
         from naive_timer import app

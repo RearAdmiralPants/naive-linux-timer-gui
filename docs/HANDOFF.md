@@ -362,6 +362,91 @@ compile check:
 When a PySide6 call takes a Python number, check which overload it actually
 resolves to.
 
+## The "segfaults after ~45 minutes" crash (fixed 2026-08-03)
+
+**It was never the GL code, and it was never a timeout.** Qt 6.11 defaults to a
+native **PipeWire audio backend** on Linux. Against PipeWire 1.0.5 (Ubuntu
+24.04) that backend takes the whole process down whenever the audio sink it is
+attached to goes away.
+
+Fixed by pinning the backend at the top of `app.py`, before anything can
+initialise QtMultimedia:
+
+```python
+os.environ.setdefault("QT_AUDIO_BACKEND", "PulseAudio")
+```
+
+"PulseAudio" still means PipeWire underneath — it is `pipewire-pulse` serving a
+libpulse client. The audio path is unchanged; only the client library differs,
+and that one survives its server rearranging devices.
+
+### How it was found
+
+Five core dumps were sitting in `coredumpctl` the whole time. **Look there
+first**; the console output is nearly useless by comparison.
+
+```bash
+coredumpctl list                      # <pid> for each `python -m naive_timer`
+coredumpctl debug <pid> --debugger=gdb --debugger-arguments="-batch -ex 'thread apply all bt'"
+```
+
+Every one of them crashed on a **PipeWire thread**, not the Qt main thread. Two
+signatures, which is why it looked like "several different root causes":
+
+- **SIGSEGV**, null deref at `+0x1c` in `libpipewire-module-protocol-native.so`
+  (`si_addr = 0x1c`, `mov 0x1c(%rsi),%edx` with `rsi = 0`). Four of the five.
+- **SIGABRT**, glibc `corrupted size vs. prev_size` inside `pw_stream_new_simple`
+  — the heap was *already* corrupt, and this allocation merely tripped over it.
+
+The abort's stack is the one that named the mechanism, top to bottom:
+
+```
+QPlatformAudioDevices::audioOutputsChanged()
+  -> QSoundEffectPrivateWithPlayer::getEngineFor()
+    -> QRtAudioEngine::QRtAudioEngine()
+      -> QAudioSink::startABIImpl()
+        -> pw_stream_new_simple() -> pw_context_new() -> ... -> calloc -> abort
+```
+
+So: the device list changes, and Qt tears down and rebuilds an entire
+`pw_context` per live sound effect. That rebuild path is what is broken.
+
+### The reproducer
+
+Deterministic — **crashed on the first iteration, every time**:
+
+1. `pactl load-module module-null-sink sink_name=fakebt`, set it default.
+2. Start the app (or just construct a `QSoundEffect`).
+3. `pactl unload-module <id>` — the sink vanishes underneath it.
+
+That is a Bluetooth headset dropping, in one command. Under
+`QT_AUDIO_BACKEND=PulseAudio` the same abuse survived 20/20 iterations, both
+idle and mid-playback.
+
+### Two things that were counter-intuitive
+
+- **Nothing has to be playing.** Constructing a `QSoundEffect` opens the stream,
+  and `TimerWidget.__init__` builds `_AlertPlayer` at startup. A freshly
+  launched app that never rings is fully exposed — which is why crashes turned
+  up with no alarm, no lock screen and no user at the keyboard.
+- **Adding and removing *other* sinks is harmless.** Only the sink the stream is
+  attached to disappearing triggers it. That is why "45 minutes" varied so much:
+  it is the wait for a Bluetooth idle-disconnect, a monitor sleeping and taking
+  its HDMI sink with it, or a card re-profiling.
+
+The four `QSocketNotifier: Socket notifiers cannot be enabled or disabled from
+another thread` warnings that preceded every crash are the same backend
+misbehaving across threads. They are a **fingerprint, not the cause** — under
+PulseAudio the count goes to zero, and it is a useful one-line check that the
+fix is actually in effect.
+
+### If you want to re-test this on a newer PipeWire
+
+`setdefault`, so `QT_AUDIO_BACKEND=PipeWire ./launch.sh` puts the old behaviour
+back for exactly that purpose. `tests/test_gui_smoke.py::
+test_the_pipewire_audio_backend_is_not_in_use` will fail while it is exported —
+deliberately.
+
 ## Running locally
 
 ```bash
