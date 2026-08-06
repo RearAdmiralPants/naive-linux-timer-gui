@@ -1,15 +1,14 @@
 # TODO
 
-- Bugs
-	- [x] **Random segfault after ~45 minutes.** Root-caused 3Aug from five saved
-	      core dumps: Qt 6.11's native **PipeWire audio backend** crashes the
-	      process whenever the audio sink it is attached to disappears. Nothing
-	      to do with the GL code, the lock screen, or elapsed time -- 45 minutes
-	      was just how long it took for something in the session to change the
-	      audio device list. Fixed by pinning `QT_AUDIO_BACKEND=PulseAudio` in
-	      `app.py`. See docs/HANDOFF.md for the diagnosis and the reproducer.
+([x] done)
+
+On shatter:
+- Nix the red fading effects
+- Can we do something with the scene lighting to cause the shattered shards to kind of sparkle intensely/noticeably? Alternatively, each shard could get a light source inside, with each one on a different rhythm of fading quickly to very high intensity and back down - we can iterate
+- Warm up the sound ~1s before shattering so e.g. bluetooth sinks don't miss the first 1/4s
 
 
+---
 - Optimizations
 	- [x] Nebula baked into a 512^2 RG16F cubemap; stars stay procedural.
 	      4K 30ms -> 6.5ms. See docs/HANDOFF.md.
@@ -29,7 +28,6 @@
 	- More triangles (attempted, see feature branch - weird)
 	- More shatter pieces (difficult!)
 	- Configurable shatter gravity (attempted, bug)
-	- Shatter fade to red -> Screenwide, not shard pieces (un-deprecate)
 
 - More movement
 	- Camera
