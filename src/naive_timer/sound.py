@@ -22,13 +22,21 @@ import tempfile
 import wave
 from typing import Sequence
 
-SAMPLE_RATE = 44100
+# Match the PipeWire graph's native format exactly, so the alert stream needs
+# neither a resampler nor a channel upmix. 48 kHz stereo is the near-universal
+# PipeWire default and is what both of this project's dev machines run; at
+# 44100 mono every alert dragged a rate conversion and an upmix behind it.
+#
+# Synthesis stays mono internally -- only the WAV writers duplicate to stereo.
+# Nothing about the sound changes, just the container.
+SAMPLE_RATE = 48000
+CHANNELS = 2
 _DEFAULT_NOTES = (587.33, 880.0)  # D5, A5 — a soft, non-jarring interval
 
 # Bump when the synthesis changes, so cached files in the temp dir are not
 # reused after an edit. Without this, tweaking a shatter parameter appears to
-# do nothing until you delete the WAV by hand.
-_CACHE_VERSION = 3
+# do nothing until you delete the WAV by hand. (v4: 48 kHz stereo.)
+_CACHE_VERSION = 4
 
 
 def generate_chime_wav(
@@ -54,12 +62,13 @@ def generate_chime_wav(
             # Raised-cosine envelope: no clicks at note boundaries.
             env = 0.5 * (1 - math.cos(2 * math.pi * i / n))
             sample = env * math.sin(2 * math.pi * freq * i / sample_rate)
-            frames += struct.pack("<h", int(sample * max_amp))
+            value = int(sample * max_amp)
+            frames += struct.pack("<" + "h" * CHANNELS, *([value] * CHANNELS))
 
-    frames += b"\x00\x00" * int(tail_silence * sample_rate)
+    frames += b"\x00" * (2 * CHANNELS) * int(tail_silence * sample_rate)
 
     with wave.open(path, "wb") as wav:
-        wav.setnchannels(1)
+        wav.setnchannels(CHANNELS)
         wav.setsampwidth(2)
         wav.setframerate(sample_rate)
         wav.writeframes(bytes(frames))
@@ -67,14 +76,19 @@ def generate_chime_wav(
 
 
 def _write_wav(path: str, samples: Sequence[float], sample_rate: int) -> str:
-    """Write float samples in [-1, 1] as 16-bit mono PCM."""
+    """Write float samples in [-1, 1] as 16-bit PCM, duplicated to CHANNELS.
+
+    The synthesis above is mono; the duplication happens here so the file
+    matches the audio graph's format and needs no upmix at playback.
+    """
     frames = bytearray()
     for value in samples:
         clipped = max(-1.0, min(1.0, value))
-        frames += struct.pack("<h", int(clipped * 32767))
+        packed = int(clipped * 32767)
+        frames += struct.pack("<" + "h" * CHANNELS, *([packed] * CHANNELS))
 
     with wave.open(path, "wb") as wav:
-        wav.setnchannels(1)
+        wav.setnchannels(CHANNELS)
         wav.setsampwidth(2)
         wav.setframerate(sample_rate)
         wav.writeframes(bytes(frames))

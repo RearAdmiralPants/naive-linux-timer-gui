@@ -884,6 +884,57 @@ class GlTest(unittest.TestCase):
         window.show()
         self.assertTrue(window.windowTitle())
 
+    def test_startup_opens_no_audio_stream(self):
+        """An idle app must hold no client stream on the default sink.
+
+        Constructing a QSoundEffect opens one -- uncorked, never written to --
+        and holds it until the object dies. Building the alert player in
+        TimerWidget.__init__ therefore parked a stream on the sink from launch
+        to exit, in both tabs, for an app that might never ring. Verified with
+        `pactl list sink-inputs` against an app that had played nothing.
+
+        That is the unresolved half of the "segfaults after ~45 minutes" bug
+        (docs/HANDOFF.md): pinning the PulseAudio backend stopped the crash but
+        left the exposure. It also puts the app in the path of every re-route
+        the session manager does, and on PipeWire 1.0.5 a re-route can strand a
+        stream with no sink and no way back.
+        """
+        from naive_timer.app import MainWindow
+
+        window = MainWindow()
+        self.assertIsNone(
+            window.timer_tab._alert,
+            "the timer built its sound objects at startup; that parks a "
+            "stream on the sink for the life of the process",
+        )
+
+    def test_the_alarm_still_gets_its_sound_in_time(self):
+        """Lazy is worthless if it is late. The warm-up must actually fire."""
+        from naive_timer import app
+        from naive_timer.app import ALERT_WARMUP_S, MainWindow
+
+        if not app._HAVE_AUDIO:
+            self.skipTest("QtMultimedia unavailable; alert is visual-only")
+
+        window = MainWindow()
+        timer = window.timer_tab
+
+        # Well outside the warm-up window: still nothing open.
+        timer._cd.configure(ALERT_WARMUP_S + 30.0)
+        timer._cd.start()
+        timer._sync_alert_player()
+        self.assertIsNone(timer._alert, "opened a stream far too early")
+
+        # Inside it: the player exists before the alarm needs it.
+        timer._cd.configure(ALERT_WARMUP_S / 2.0)
+        timer._cd.start()
+        timer._sync_alert_player()
+        self.assertIsNotNone(timer._alert, "no sound ready when the alarm fires")
+
+        # Reset must hand the stream back rather than hold it forever.
+        timer._on_reset()
+        self.assertIsNone(timer._alert, "held the stream open after reset")
+
     def test_stay_on_top_reaches_the_window_manager(self):
         """The checkbox must change the WM's mind, not merely send a message.
 

@@ -13,15 +13,21 @@ import wave
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
-from naive_timer.sound import generate_chime_wav, generate_shatter_wav
+from naive_timer.sound import CHANNELS, SAMPLE_RATE, generate_chime_wav, generate_shatter_wav
 
 
 def _read(path):
+    """Return one channel's samples plus the rate.
+
+    The files are written at CHANNELS wide with every channel identical (the
+    synthesis is mono), so the analysis tests below only need channel 0.
+    """
     with wave.open(path, "rb") as wav:
         frames = wav.getnframes()
         rate = wav.getframerate()
-        raw = struct.unpack(f"<{frames}h", wav.readframes(frames))
-    return [v / 32768.0 for v in raw], rate
+        channels = wav.getnchannels()
+        raw = struct.unpack(f"<{frames * channels}h", wav.readframes(frames))
+    return [v / 32768.0 for v in raw[::channels]], rate
 
 
 class SoundTest(unittest.TestCase):
@@ -31,9 +37,9 @@ class SoundTest(unittest.TestCase):
             generate_chime_wav(path, note_seconds=0.1, tail_silence=0.1)
             self.assertTrue(os.path.exists(path))
             with wave.open(path, "rb") as wav:
-                self.assertEqual(wav.getnchannels(), 1)
+                self.assertEqual(wav.getnchannels(), CHANNELS)
                 self.assertEqual(wav.getsampwidth(), 2)
-                self.assertEqual(wav.getframerate(), 44100)
+                self.assertEqual(wav.getframerate(), SAMPLE_RATE)
                 self.assertGreater(wav.getnframes(), 0)
 
 
@@ -43,10 +49,10 @@ class ShatterTest(unittest.TestCase):
             path = os.path.join(d, "shatter.wav")
             generate_shatter_wav(path, seconds=0.4, resonances=4, fragments=6)
             with wave.open(path, "rb") as wav:
-                self.assertEqual(wav.getnchannels(), 1)
+                self.assertEqual(wav.getnchannels(), CHANNELS)
                 self.assertEqual(wav.getsampwidth(), 2)
-                self.assertEqual(wav.getframerate(), 44100)
-                self.assertEqual(wav.getnframes(), int(0.4 * 44100))
+                self.assertEqual(wav.getframerate(), SAMPLE_RATE)
+                self.assertEqual(wav.getnframes(), int(0.4 * SAMPLE_RATE))
 
     def test_amplitude_is_the_peak_after_normalisation(self) -> None:
         """`amplitude` must mean headroom, whatever the layers summed to."""

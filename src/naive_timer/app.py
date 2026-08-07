@@ -329,6 +329,15 @@ def stay_on_top() -> _StayOnTop:
 # ~60 FPS refresh for smooth animation.
 FRAME_MS = 16
 
+# How long before the alarm to build the sound objects. The app holds no audio
+# resources outside this window and the alert itself -- see
+# TimerWidget._sync_alert_player() for why that matters.
+#
+# Note this opens the client stream early; it does not resume a suspended sink,
+# which is what a Bluetooth sink actually needs to not clip the first fraction
+# of a second. That needs a silent play, and is not implemented yet.
+ALERT_WARMUP_S = 1.0
+
 _ICON_DIR = Path(__file__).parent / "icons"
 
 # Desktop identity. This must match the installed .desktop file's basename,
@@ -490,7 +499,8 @@ class TimerWidget(QWidget):
         self._cd = Countdown()
         self._shard = ShardWidget(self._cd, params)
         self._alerting = False
-        self._alert = _AlertPlayer() if _HAVE_AUDIO else None
+        # Built on demand, never at startup -- see _sync_alert_player().
+        self._alert: "_AlertPlayer | None" = None
 
         self._mode = QComboBox()
         self._mode.addItems(["Duration", "Alarm at"])
@@ -584,25 +594,62 @@ class TimerWidget(QWidget):
         self._start_btn.setText("Pause")
 
     def _on_reset(self) -> None:
-        self._stop_alert()
+        # The countdown has to be reset *before* _stop_alert(), which re-checks
+        # whether the alarm is still imminent: called the other way round, a
+        # reset inside the last ALERT_WARMUP_S sees a still-running countdown
+        # and keeps the sound objects alive. Only until the next frame, but the
+        # point of the exercise is not to hold streams we have no use for.
         self._cd.reset()
+        self._stop_alert()
         self._start_btn.setText("Start")
         self._status.setText("")
 
     def _on_dismiss(self) -> None:
-        self._stop_alert()
         self._cd.dismiss()
+        self._stop_alert()
 
     def _stop_alert(self) -> None:
         self._alerting = False
         self._dismiss_btn.setVisible(False)
         self._shard.set_alarm(False)
-        if self._alert is not None:
+        self._sync_alert_player()
+
+    def _sync_alert_player(self) -> None:
+        """Hold audio resources only while the alarm is imminent or ringing.
+
+        Constructing a ``QSoundEffect`` opens a client stream on the default
+        sink and keeps it there until the object dies -- uncorked, at that,
+        with nothing ever written to it. Building ``_AlertPlayer`` in
+        ``__init__`` therefore parked a permanent stream on the sink from
+        launch to exit, in *both* tabs, for an app that might never ring.
+
+        That is the same exposure that produced the "segfaults after ~45
+        minutes" bug (see docs/HANDOFF.md): pinning the PulseAudio backend
+        stopped the crash but left the stream. It also makes the app a
+        participant in every device-list change and every re-route the session
+        manager performs -- and on PipeWire 1.0.5 a re-route can leave a stream
+        orphaned, linked to no sink and corked, which is silent and permanent.
+
+        So: no audio objects until the countdown is nearly up, and they are
+        released as soon as it is not. Declarative rather than event-driven
+        because pause, resume, reset and dismiss all have to be covered, and an
+        invariant checked once a frame cannot miss one of them.
+        """
+        if not _HAVE_AUDIO:
+            return
+        imminent = self._alerting or (
+            self._cd.is_running and self._cd.remaining() <= ALERT_WARMUP_S
+        )
+        if imminent and self._alert is None:
+            self._alert = _AlertPlayer()
+        elif not imminent and self._alert is not None:
             self._alert.stop()
+            self._alert = None
 
     def _tick(self) -> None:
         self._shard.set_text(format_elapsed(self._cd.remaining()))
         self._shard.advance(self._clock.tick())
+        self._sync_alert_player()
 
         # The alert is carried entirely by the shard: it fractures, then
         # breathes dark red. No background flash -- that read as jarring.
@@ -616,6 +663,10 @@ class TimerWidget(QWidget):
 
     def _begin_alert(self) -> None:
         self._alerting = True
+        # Normally _tick's warm-up built this ALERT_WARMUP_S ago. This covers
+        # the cases it cannot: a countdown configured with less than that left,
+        # or start_with() from the --timer flag firing almost immediately.
+        self._sync_alert_player()
         self._status.setText("⏰ Time's up!")
         self._start_btn.setText("Start")
         self._dismiss_btn.setVisible(True)
