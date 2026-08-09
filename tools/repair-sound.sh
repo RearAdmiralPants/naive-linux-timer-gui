@@ -10,8 +10,38 @@
 # which everything the system tried to play comes out at once. Spotify keeps
 # showing a running clock throughout.
 #
-# It is not the hardware. Captured mid-wedge twice, every ALSA PCM was `closed`
-# and every sink node was healthy both times.
+# ROOT CAUSE (found 2026-08-09)
+#
+# The SoundWire playback PCM enters an xrun loop it cannot recover from. In the
+# pipewire journal, thousands per second:
+#
+#     spa.alsa: hw:sofsoundwirep: (375 suppressed)
+#               snd_pcm_avail after recover: Broken pipe
+#
+# -EPIPE is an xrun; getting it again *immediately after* recovery means the
+# recovery does not take. PipeWire spins for minutes, the node eventually
+# suspends, the PCM closes, and client streams are left corked with nothing to
+# resume them. Switching sinks cures it because that forces a fresh PCM open.
+#
+# So the states this script detects are the AFTERMATH, not the cause. Both are
+# still worth detecting and repairing -- they are what is left to clean up --
+# but the fix for the underlying fault is not in here.
+#
+# Correlates with Moonlight: 7 of 8 xrun episodes since Aug 1 had it running
+# within half an hour, and it runs a small fraction of the time. NOT via
+# creating sinks (none present at wedge time) and NOT via its split-lock traps
+# (258 trap-minutes vs 43 xrun-minutes, only 7 overlapping -- refuted). The
+# same error is reported elsewhere specifically under remote-play and game
+# streaming workloads, so the mechanism is likely load- or timing-related
+# rather than anything Moonlight does to the graph.
+#
+# It is inspiron-only, and the hardware is why: `hw:sofsoundwirep` is the
+# SoundWire PCM (RT711 + 2x RT1308 + RT715 across four master links). dove runs
+# identical PipeWire/WirePlumber/Mint but is plain sof-hda-dsp, and has never
+# shown it.
+#
+# Captured mid-wedge twice, every ALSA PCM was `closed` and every sink node was
+# healthy -- the damage is done by then and the device has already been closed.
 #
 # TWO DISTINCT FAILURE MODES, and they need different detection
 #
@@ -48,8 +78,14 @@
 # of the five sinks here are HDMI), card profile switches, a wireplumber
 # restart.
 #
-# Mode 2: a seek in Spotify did it once. Chromium's audio backend recreates its
-# output stream on seek, so the suspicion is a cork/uncork race there.
+# Mode 2: downstream of the xrun loop above. The seek in Spotify that appeared
+# to trigger it was a coincidence of timing -- the PCM had already been failing
+# for minutes by then, and an earlier episode that evening (23:23-23:29)
+# preceded both the seek and Moonlight's launch.
+#
+# To check whether an episode is in progress right now:
+#
+#     journalctl --user -u pipewire --since "-10 min" | grep "Broken pipe"
 #
 # NOT the timer app. It was not running for the 2026-08-07 instance at all, and
 # for 2026-08-08 it was running but held no sink-input (since 8dcde8b it holds
@@ -77,7 +113,16 @@
 
 set -uo pipefail
 
-usage() { sed -n '3,74p' "$0" | sed 's/^# \{0,1\}//; s/^#$//'; }
+# Print the whole leading comment block, however long it grows.
+usage() { awk 'NR>2 && /^#/ { sub(/^# ?/, ""); print; next } NR>2 { exit }' "$0"; }
+
+# Is the underlying fault active right now? This is the one thing worth
+# knowing before anything else: an episode in progress means the PCM is still
+# failing and any repair below will not hold.
+xrun_episode() {
+	journalctl --user -u pipewire --no-pager --since "-15 min" 2>/dev/null \
+		| grep -c "snd_pcm_avail after recover"
+}
 
 OBSERVE_ONLY=0
 for arg in "$@"; do
@@ -237,6 +282,21 @@ if [ -n "$(mpris_players)" ]; then
 	done
 else
 	echo "  (none, or busctl unavailable)"
+fi
+echo
+
+echo "=== root cause: is the PCM failing? ==="
+XRUNS=$(xrun_episode)
+if [ "${XRUNS:-0}" -gt 0 ]; then
+	echo "  YES -- $XRUNS 'snd_pcm_avail after recover' lines in the last 15 min."
+	echo "  The SoundWire PCM is in an unrecoverable xrun loop. Anything below"
+	echo "  is aftermath, and a repair may not hold until the loop stops."
+	journalctl --user -u pipewire --no-pager --since "-15 min" 2>/dev/null \
+		| grep "snd_pcm_avail after recover" | tail -2 | sed 's/^/    /'
+	echo "  Moonlight running? $(pgrep -c -i moonlight 2>/dev/null || echo 0) process(es)."
+else
+	echo "  no -- nothing in the pipewire log in the last 15 min."
+	echo "  If audio is dead, the PCM failed earlier and left the mess below."
 fi
 echo
 
