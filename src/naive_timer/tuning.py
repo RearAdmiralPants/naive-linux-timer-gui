@@ -15,7 +15,7 @@ import os
 from pathlib import Path
 
 from PySide6.QtCore import Qt
-from PySide6.QtGui import QFont
+from PySide6.QtGui import QFont, QGuiApplication
 from PySide6.QtWidgets import (
     QCheckBox,
     QFileDialog,
@@ -27,6 +27,7 @@ from PySide6.QtWidgets import (
     QLineEdit,
     QMessageBox,
     QPushButton,
+    QScrollArea,
     QSlider,
     QVBoxLayout,
     QWidget,
@@ -99,6 +100,7 @@ _SLIDERS = [
     ("light_x", -5.0, 5.0),
     ("light_y", -5.0, 5.0),
     ("light_z", 0.5, 6.0),
+    ("light_intensity", 0.0, 8.0),
     ("spec_power", 1.0, 160.0),
     ("spec_strength", 0.0, 2.0),
     ("fresnel", 0.0, 2.0),
@@ -121,6 +123,26 @@ _SHATTER_SLIDERS = [
     ("shatter_clear_s", 1.0, 20.0), # seconds the pieces are drawn before clearing
 ]
 
+# Frame-wide, not shard-wide: these run over the composited scene, after the
+# sky and the glass have already been drawn into the HDR buffer.
+#
+# exposure and rolloff are a pair with light_intensity over in Glass. Intensity
+# drives radiance up; rolloff decides how much headroom the tonemap has before
+# the highlight flattens into a white blob; exposure re-seats the whole frame
+# once the other two have moved it. Pushing intensity alone is what clipping
+# looks like.
+_POST_SLIDERS = [
+    ("exposure", 0.0, 4.0),
+    ("rolloff", 0.10, 2.0),
+    ("bloom", 0.0, 2.0),
+    ("bloom_threshold", 0.0, 4.0),
+    ("bloom_radius", 0.0, 4.0),
+    ("flare", 0.0, 2.0),
+    ("flare_threshold", 0.0, 6.0),
+    ("flare_streak", 0.0, 3.0),
+    ("flare_length", 0.0, 12.0),
+]
+
 _SKY_SLIDERS = [
     ("nebula", 0.0, 1.5),
     ("star_density", 10.0, 200.0),
@@ -135,6 +157,31 @@ _CAMERA_SLIDERS = [
     ("orbit_bob", 0.0, 1.0),
     ("idle_spin", 0.0, 0.6),
 ]
+
+class _Slider(QSlider):
+    """A horizontal slider that ignores the mouse wheel unless it has focus.
+
+    Necessary the moment the panel became scrollable. Qt gives a slider the
+    wheel whenever the pointer is over it, so scrolling down a column of thirty
+    sliders silently rewrites every value the pointer crosses on the way -- and
+    since each one repaints the shard live, you would watch the look dissolve
+    while trying to reach the controls at the bottom.
+
+    Ignoring the event rather than swallowing it lets it fall through to the
+    scroll area, which is what the wheel was meant for here. Click a slider
+    first and the wheel works on it as normal.
+    """
+
+    def __init__(self) -> None:
+        super().__init__(Qt.Horizontal)
+        self.setFocusPolicy(Qt.StrongFocus)
+
+    def wheelEvent(self, event) -> None:  # noqa: N802 (Qt naming)
+        if self.hasFocus():
+            super().wheelEvent(event)
+        else:
+            event.ignore()
+
 
 class _HexColorEdit(QLineEdit):
     """A 24-bit RRGGBB entry that only applies a value once it is valid.
@@ -178,15 +225,25 @@ class TuningPanel(QWidget):
         outer = QVBoxLayout(self)
         self._labels: dict[str, QLabel] = {}
         self._sliders: dict[str, QSlider] = {}
+        # Each slider's int-per-unit scale, recorded at build time. _sync_widgets
+        # needs it: it used to assume 100 for everything, which drove
+        # front_subdiv (scale 1, range 0..5) to its maximum on every Load.
+        self._scales: dict[str, float] = {}
 
-        # Two columns so the panel stops overflowing the screen. The split is
-        # semantic, not just arithmetic: the left column is how the shard
-        # *looks* (its glass and the colour/font appearance box), the right is
-        # the *scene* it sits in (camera and sky). That also balances the
-        # heights — the tall Glass group is offset by the two shorter scene
-        # groups stacked together.
-        columns = QHBoxLayout()
-        outer.addLayout(columns)
+        # Two columns, and the pair of them inside a scroll area. The columns
+        # alone were enough until the tonemap and glare group arrived; nine more
+        # rows pushed the bottom of the panel past the bottom of the screen,
+        # where the Numerals box became unreachable rather than merely cramped.
+        #
+        # The split is semantic, not just arithmetic: the left column is how the
+        # shard *looks* (its glass, its front face, its numerals), the right is
+        # the *frame* it sits in -- camera, sky, shatter, and the tonemap and
+        # glare, which act on the whole composited image rather than on the
+        # shard. That reading also happens to balance the two heights, which is
+        # what keeps the scroll as short as it can be.
+        body = QWidget()
+        columns = QHBoxLayout(body)
+        columns.setContentsMargins(0, 0, 0, 0)
         left = QVBoxLayout()
         right = QVBoxLayout()
         columns.addLayout(left)
@@ -197,6 +254,7 @@ class TuningPanel(QWidget):
         right.addWidget(self._slider_group("Camera", _CAMERA_SLIDERS))
         right.addWidget(self._slider_group("Sky", _SKY_SLIDERS))
         right.addWidget(self._slider_group("Shatter", _SHATTER_SLIDERS))
+        right.addWidget(self._slider_group("Tonemap and glare", _POST_SLIDERS))
 
         appearance = QGroupBox("Numerals")
         aform = QFormLayout(appearance)
@@ -245,6 +303,15 @@ class TuningPanel(QWidget):
         left.addStretch(1)
         right.addStretch(1)
 
+        scroll = QScrollArea()
+        scroll.setWidget(body)
+        # Without this the scroll area treats `body` as a fixed-size canvas and
+        # never lets it use the panel's full width, so the sliders stay at their
+        # minimum and a horizontal scrollbar appears for no reason.
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QScrollArea.NoFrame)
+        outer.addWidget(scroll)
+
         # Where Save/Load default to, remembered across a session so the second
         # click doesn't make you navigate again.
         self._settings_path = os.path.join(os.getcwd(), "shard_params.json")
@@ -258,7 +325,21 @@ class TuningPanel(QWidget):
             button = QPushButton(text)
             button.clicked.connect(slot)
             buttons.addWidget(button)
+        # Outside the scroll area, so Save/Load/Print stay pinned to the bottom
+        # instead of being something you have to scroll down to find.
         outer.addLayout(buttons)
+
+        # Open tall enough to need as little scrolling as possible, but never
+        # taller than the screen it has to fit on -- which is the failure this
+        # whole scroll area exists to fix, and would otherwise just come back at
+        # a larger content size.
+        screen = self.screen() or QGuiApplication.primaryScreen()
+        available = screen.availableGeometry() if screen else None
+        wanted = body.sizeHint().height() + 80
+        self.resize(
+            max(self.minimumWidth(), body.sizeHint().width() + 40),
+            min(wanted, int(available.height() * 0.9)) if available else wanted,
+        )
 
         # Every control now exists, so a startup file can drive them all.
         # Skip autoload when --json was used: the explicit CLI params take
@@ -271,12 +352,13 @@ class TuningPanel(QWidget):
         form = QFormLayout(box)
         for name, lo, hi, *rest in specs:
             scale = rest[0] if rest else 100
-            slider = QSlider(Qt.Horizontal)
+            slider = _Slider()
             slider.setRange(int(lo * scale), int(hi * scale))
             slider.setValue(int(round(getattr(self._params, name) * scale)))
             label = QLabel(f"{getattr(self._params, name):.2f}")
             self._labels[name] = label
             self._sliders[name] = slider
+            self._scales[name] = scale
             slider.valueChanged.connect(
                 lambda v, n=name, s=scale: self._on_slider(n, v / s)
             )
@@ -377,7 +459,7 @@ class TuningPanel(QWidget):
         for name, slider in self._sliders.items():
             value = getattr(self._params, name)
             slider.blockSignals(True)
-            slider.setValue(int(value * 100))
+            slider.setValue(int(round(value * self._scales[name])))
             slider.blockSignals(False)
             self._labels[name].setText(f"{value:.2f}")
 
@@ -405,7 +487,8 @@ class TuningPanel(QWidget):
         p: ShardParams = self._params
         print("\n# --- paste into ShardParams defaults ---")
         for name, _lo, _hi, *_ in (
-            _SLIDERS + _GEOMETRY_SLIDERS + _CAMERA_SLIDERS + _SKY_SLIDERS
+            _SLIDERS + _GEOMETRY_SLIDERS + _POST_SLIDERS
+            + _CAMERA_SLIDERS + _SKY_SLIDERS + _SHATTER_SLIDERS
         ):
             print(f"    {name}: float = {getattr(p, name):.2f}")
         for name in (
