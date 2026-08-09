@@ -30,10 +30,12 @@ from PySide6.QtGui import (
     QMatrix4x4,
     QPainter,
     QSurfaceFormat,
+    QVector2D,
     QVector3D,
 )
 from PySide6.QtOpenGL import (
     QOpenGLFramebufferObject,
+    QOpenGLFramebufferObjectFormat,
     QOpenGLBuffer,
     QOpenGLShader,
     QOpenGLShaderProgram,
@@ -63,6 +65,76 @@ _GL_COLOR_ATTACHMENT0 = 0x8CE0
 _GL_TEXTURE_CUBE_MAP_POSITIVE_X = 0x8515  # the other five faces follow it
 _GL_TEXTURE_CUBE_MAP_SEAMLESS = 0x884F
 _GL_TEXTURE0 = 0x84C0
+_GL_TEXTURE1 = 0x84C1
+_GL_TEXTURE2 = 0x84C2
+_GL_TEXTURE_2D = 0x0DE1
+_GL_TEXTURE_MIN_FILTER = 0x2801
+_GL_TEXTURE_MAG_FILTER = 0x2800
+_GL_TEXTURE_WRAP_S = 0x2802
+_GL_TEXTURE_WRAP_T = 0x2803
+_GL_LINEAR = 0x2601
+_GL_CLAMP_TO_EDGE = 0x812F
+
+# Half-float, not 8-bit. This is the format that makes the whole lighting chain
+# work: an 8-bit target clamps every highlight to 1.0 at write time, so a
+# specular carrying radiance 20 and one carrying radiance 1.1 land in the buffer
+# as the same white and the bright-pass can no longer tell them apart. RGBA16F
+# keeps the real value all the way to the tonemap.
+_GL_RGBA16F = 0x881A
+
+# Multisample count for the offscreen scene target. The widget's default
+# framebuffer gets its MSAA from QSurfaceFormat (see default_surface_format),
+# but we no longer draw the scene there -- so the samples have to be requested
+# again here or the geometry's edges would come back aliased.
+_SCENE_SAMPLES = 4
+
+# The bloom chain runs at a *fraction* of the scene's resolution, and the
+# fraction is chosen from the window size rather than fixed.
+#
+# A fixed half was measured and is wrong at the top end. Glare and flare are
+# low-frequency by construction -- they are the output of a wide blur -- so
+# their cost scales with resolution while their *content* does not. At 420x620
+# the whole post chain costs 0.84 ms; at half of 4K it costs 15.3 ms, which is
+# the entire frame budget before the scene has drawn a single triangle.
+#
+# So: halve until the chain is no wider than this, which caps the cost of every
+# pass downstream of the bright-pass regardless of how large the window gets.
+# Small windows still get the full half-resolution chain and stay crisp.
+_BLOOM_MAX_WIDTH = 960
+_BLOOM_MAX_DIVISOR = 8
+
+
+def _bloom_divisor(width: int) -> int:
+    """Downscale factor for the glare chain at a given scene width."""
+    divisor = 2
+    while width // divisor > _BLOOM_MAX_WIDTH and divisor < _BLOOM_MAX_DIVISOR:
+        divisor *= 2
+    return divisor
+
+# Separable blur iterations, and the texel step each one takes. Growing the step
+# geometrically is what produces a wide, soft falloff from a small kernel: three
+# passes at 1/2/4 texels reach far further than one nine-tap pass ever could,
+# for six cheap draws over a half-resolution buffer.
+_BLOOM_STEPS = (1.0, 2.0, 4.0)
+
+# Post-process fragment stages, each paired with sky.vert's fullscreen triangle
+# and each hot-reloaded like everything else. The uniforms listed are cached by
+# location for the same reason the shard's are -- see _load_program.
+_POST_STAGES = {
+    "post_bright": ("uScene", "uTexel", "uExposure", "uThreshold"),
+    "post_blur": ("uSource", "uDir"),
+    "post_flare": ("uSource", "uTexel", "uStreak", "uLength", "uThreshold"),
+    "post_composite": (
+        "uScene", "uBloom", "uFlare",
+        "uExposure", "uBloomStrength", "uFlareStrength", "uRolloff",
+    ),
+}
+
+# Half-resolution scratch buffers. Three, not two: the bloom blur ping-pongs
+# between the first two and would overwrite the bright-pass output, but the
+# flare needs that same output as *its* source. The third holds the flare while
+# the bloom chain runs.
+_SCRATCH_BUFFERS = 3
 
 # Cube face size for the baked nebula. The nebula is low-frequency by
 # construction -- a domain-warped fbm thresholded into wisps -- so it survives
@@ -207,6 +279,13 @@ class ShardParams:
     light_x: float = 2.4
     light_y: float = 2.2
     light_z: float = 2.0
+    # Scalar radiance multiplier on everything the light drives. 1.0 is the
+    # look every saved preset was tuned against, so it must stay the default.
+    #
+    # It is *not* a blend toward white: the whitening you get by pushing it
+    # comes out of the per-channel tonemap, which saturates the strongest
+    # channel first. See the roll-off note in shard.frag.
+    light_intensity: float = 1.0
     spec_power: float = 48.0
     spec_strength: float = 0.85
     fresnel: float = 0.55
@@ -256,6 +335,41 @@ class ShardParams:
     # The shard's own idle rotation, on top of the orbit. Zero by default now
     # that the camera moves -- two rotations at once is a lot of motion.
     idle_spin: float = 0.0
+
+    # Tonemap and glare. These are frame-wide, not shard-wide: everything the
+    # scene draws goes through them, which is the point of doing the tonemap
+    # once at the end rather than per-object.
+    #
+    # exposure is a plain stop adjustment on the whole frame. rolloff is the
+    # tonemap's shoulder -- the curve clips at radiance 1/(1 - rolloff), so 0.55
+    # (the value this was hardcoded to inside shard.frag) runs out of headroom
+    # at 2.22. Raise it when raising light_intensity.
+    exposure: float = 1.0
+    rolloff: float = 0.55
+    # Glare. bloom_threshold is the radiance a pixel has to clear before it
+    # throws any; at 1.0 that is roughly "brighter than white", so only genuine
+    # highlights bloom and the sky stays clean. bloom_radius scales the blur's
+    # reach.
+    bloom: float = 0.35
+    bloom_threshold: float = 1.0
+    bloom_radius: float = 1.0
+    # Lens flare: ghosts, halo and streaks. Needs no gate of its own -- it is
+    # built from the same bright-pass buffer as the glare, so at a low
+    # light_intensity there is simply nothing over the threshold for it to be
+    # built out of, and it fades in by itself as the highlights get hot.
+    # flare_threshold is *on top of* bloom_threshold: the flare is built from
+    # whatever clears both, so it keys off only the searing cores while the
+    # glare still picks up everything merely bright. Set it to 0 and the two
+    # share a source, which turns a blown-out facet into a blown-out ghost.
+    # Deliberately subtle by default. A strong flare washes ghosts straight
+    # across the numerals, and this is a timer -- the readout is the point (the
+    # same reasoning that made the camera sway rather than orbit). The dramatic
+    # setting belongs to the shatter, when there is no longer a readout to
+    # protect.
+    flare: float = 0.25
+    flare_threshold: float = 1.5
+    flare_streak: float = 1.0
+    flare_length: float = 4.0
 
     # Procedural backdrop. star_density counts cells across the whole celestial
     # sphere now that the sky is 3D, so it needs to be far larger than the
@@ -897,6 +1011,16 @@ class ShardWidget(QOpenGLWidget):
         self._sky_uniforms: dict[str, int] = {}
         self._sky_vao = QOpenGLVertexArrayObject()
         self._nebula_cube: QOpenGLTexture | None = None
+
+        # Offscreen HDR chain. _scene_fbo is multisampled and cannot be sampled
+        # from, so it is blit-resolved into _resolve_fbo; the bloom pair
+        # ping-pongs at half resolution. All four are rebuilt on resize.
+        self._scene_fbo: QOpenGLFramebufferObject | None = None
+        self._resolve_fbo: QOpenGLFramebufferObject | None = None
+        self._bloom_fbos: list[QOpenGLFramebufferObject] = []
+        self._target_size: tuple[int, int] = (0, 0)
+        self._post_programs: dict[str, QOpenGLShaderProgram] = {}
+        self._post_uniforms: dict[str, dict[str, int]] = {}
         self._elapsed = 0.0
         self._texture: QOpenGLTexture | None = None
         self._text_dirty = True
@@ -920,7 +1044,10 @@ class ShardWidget(QOpenGLWidget):
         self.setMinimumSize(280, 280)
 
         self._watcher = QFileSystemWatcher(self)
-        for name in ("shard.vert", "shard.frag", "sky.vert", "sky.frag"):
+        for name in (
+            "shard.vert", "shard.frag", "sky.vert", "sky.frag",
+            *(f"{stage}.frag" for stage in _POST_STAGES),
+        ):
             self._watcher.addPath(str(_SHADER_DIR / name))
         self._watcher.fileChanged.connect(self._on_shader_changed)
 
@@ -1157,10 +1284,11 @@ class ShardWidget(QOpenGLWidget):
             name: program.uniformLocation(name)
             for name in (
                 "uText", "uModel", "uView", "uProj", "uNormalMat",
-                "uCamPos", "uLightPos", "uLightColor", "uGlassColor",
-                "uTextColor",
+                "uCamPos", "uLightPos", "uLightColor", "uLightIntensity",
+                "uGlassColor", "uTextColor",
                 "uSpecPower", "uSpecStrength", "uFresnel", "uGlow",
-                "uEtch", "uEtchDepth", "uBaseAlpha", "uAlarm", "uShatterT",
+                "uEtch", "uEtchDepth", "uBaseAlpha",
+                "uAlarm", "uShatterT",
                 "uGravity",
                 "uSpin",
                 "uSpinAtBreak",
@@ -1225,6 +1353,119 @@ class ShardWidget(QOpenGLWidget):
         # The shape the runtime pass samples comes from this same source, so a
         # hot-reload that changes the noise must re-bake or the two disagree.
         self._bake_nebula()
+
+    def _load_post_programs(self) -> None:
+        """Compile the post-process stages. Keep the old ones if any fails.
+
+        They all share sky.vert -- the fullscreen triangle built from
+        gl_VertexID, with no vertex buffer -- because that is exactly what each
+        of them needs and a second identical copy of it would only be one more
+        file to keep in sync.
+        """
+        for stage, names in _POST_STAGES.items():
+            program = QOpenGLShaderProgram()
+            ok = program.addShaderFromSourceFile(
+                QOpenGLShader.Vertex, str(_SHADER_DIR / "sky.vert")
+            ) and program.addShaderFromSourceFile(
+                QOpenGLShader.Fragment, str(_SHADER_DIR / f"{stage}.frag")
+            )
+            if ok:
+                ok = program.link()
+            if not ok:
+                log = program.log().strip()
+                if stage not in self._post_programs:
+                    raise RuntimeError(f"initial {stage} compile failed:\n{log}")
+                print(f"[post] {stage} reload failed, keeping previous:\n{log}")
+                continue
+
+            program.bind()
+            locations = {
+                name: program.uniformLocation(name) for name in names
+            }
+            # Samplers are bound to fixed units and never move, so they are set
+            # here once rather than every frame.
+            for name, unit in (
+                ("uScene", 0), ("uSource", 0), ("uBloom", 1), ("uFlare", 2),
+            ):
+                location = locations.get(name, -1)
+                if location >= 0:
+                    program.setUniformValue1i(location, unit)
+            program.release()
+
+            self._post_uniforms[stage] = locations
+            self._post_programs[stage] = program
+        print("[post] shaders reloaded")
+
+    def _post_set(self, stage: str, name: str, value, *, is_float=False) -> None:
+        program = self._post_programs[stage]
+        location = self._post_uniforms[stage].get(name, -1)
+        if location < 0:
+            return
+        if is_float:
+            program.setUniformValue1f(location, float(value))
+        else:
+            program.setUniformValue(location, value)
+
+    # -- offscreen targets ------------------------------------------------
+
+    def _ensure_targets(self, width: int, height: int) -> None:
+        """Allocate the HDR chain, reallocating only when the size changes.
+
+        Every buffer here is RGBA16F. The scene target additionally carries
+        multisampling and a depth attachment; the rest are single-sample colour
+        only, since nothing after the resolve has geometry to antialias or
+        depth to test.
+        """
+        if self._target_size == (width, height) and self._scene_fbo is not None:
+            return
+        self._target_size = (width, height)
+
+        scene_format = QOpenGLFramebufferObjectFormat()
+        scene_format.setInternalTextureFormat(_GL_RGBA16F)
+        scene_format.setAttachment(QOpenGLFramebufferObject.CombinedDepthStencil)
+        scene_format.setSamples(_SCENE_SAMPLES)
+        self._scene_fbo = QOpenGLFramebufferObject(
+            QSize(width, height), scene_format
+        )
+
+        colour_format = QOpenGLFramebufferObjectFormat()
+        colour_format.setInternalTextureFormat(_GL_RGBA16F)
+        self._resolve_fbo = QOpenGLFramebufferObject(
+            QSize(width, height), colour_format
+        )
+
+        divisor = _bloom_divisor(width)
+        bloom_size = QSize(max(1, width // divisor), max(1, height // divisor))
+        self._bloom_fbos = [
+            QOpenGLFramebufferObject(bloom_size, colour_format)
+            for _ in range(_SCRATCH_BUFFERS)
+        ]
+
+        # Qt does not promise a filter mode on an FBO's texture, and every one
+        # of these is sampled with bilinear taps at offsets that fall between
+        # texel centres -- the 2x2 box in the bright-pass, the growing steps in
+        # the blur, the half-to-full upscale in the composite. Left on NEAREST
+        # the glare would come back blocky and would crawl as the camera moves.
+        fns = self.context().functions()
+        for fbo in (self._resolve_fbo, *self._bloom_fbos):
+            fns.glBindTexture(_GL_TEXTURE_2D, fbo.texture())
+            for pname, value in (
+                (_GL_TEXTURE_MIN_FILTER, _GL_LINEAR),
+                (_GL_TEXTURE_MAG_FILTER, _GL_LINEAR),
+                # Clamped, so the blur's taps near an edge repeat the border
+                # pixel instead of wrapping the glare round to the far side.
+                (_GL_TEXTURE_WRAP_S, _GL_CLAMP_TO_EDGE),
+                (_GL_TEXTURE_WRAP_T, _GL_CLAMP_TO_EDGE),
+            ):
+                fns.glTexParameteri(_GL_TEXTURE_2D, pname, value)
+        fns.glBindTexture(_GL_TEXTURE_2D, 0)
+
+        got = self._scene_fbo.format().samples()
+        print(
+            f"[post] targets {width}x{height} RGBA16F, {got}x MSAA, "
+            f"glare at {bloom_size.width()}x{bloom_size.height()} (1/{divisor})"
+            + ("" if got else "  <-- multisampling unavailable")
+        )
 
     def _bake_nebula(self) -> None:
         """Render the nebula's direction-only factors into a cubemap, once.
@@ -1486,24 +1727,58 @@ class ShardWidget(QOpenGLWidget):
 
         self._load_program()
         self._load_sky_program()
+        self._load_post_programs()
 
     def paintGL(self) -> None:  # noqa: N802
         if self._shaders_dirty:
             self._shaders_dirty = False
             self._load_program()
             self._load_sky_program()
+            self._load_post_programs()
         if self._text_dirty:
             self._upload_text()
         if self._geometry_dirty:
             self._upload_geometry()
 
         fns = self.context().functions()
+
+        # Qt sizes the widget's framebuffer in device pixels, not logical ones,
+        # and so must every target in the chain -- otherwise the composite
+        # resamples the scene on a HiDPI screen and the numerals go soft.
+        ratio = self.devicePixelRatio()
+        width = max(1, int(self.width() * ratio))
+        height = max(1, int(self.height() * ratio))
+        self._ensure_targets(width, height)
+
+        # --- scene, into the HDR target -------------------------------------
+        self._scene_fbo.bind()
+        fns.glViewport(0, 0, width, height)
         fns.glClear(_GL_COLOR_BUFFER_BIT | _GL_DEPTH_BUFFER_BIT)
 
         # Backdrop first, and unconditionally: the shard may be gone, but the
         # sky is still there.
         self._draw_sky(fns)
+        self._draw_shard(fns)
 
+        # Multisampled targets cannot be sampled from, so resolve down to a
+        # plain RGBA16F texture the post chain can read.
+        QOpenGLFramebufferObject.blitFramebuffer(
+            self._resolve_fbo, self._scene_fbo
+        )
+
+        # --- glare, then the single tonemap ---------------------------------
+        self._render_bloom(fns, width, height)
+        self._composite(fns, width, height)
+
+    def _draw_shard(self, fns) -> None:
+        """Rasterise the shard into whatever target is bound. Linear radiance.
+
+        Split out of paintGL when the tonemap moved to the composite: this
+        stage has two perfectly good reasons to draw nothing at all (no program
+        yet, or the wedges have tumbled out of frame), and once there are passes
+        that must run *afterwards*, an early return from paintGL would take the
+        tonemap down with it and the window would go black.
+        """
         program = self._program
         if program is None or self._texture is None:
             return
@@ -1544,6 +1819,7 @@ class ShardWidget(QOpenGLWidget):
         self._set("uLightColor", QVector3D(*p.light_color))
         self._set("uGlassColor", QVector3D(*p.glass_color))
         self._set("uTextColor", QVector3D(*p.text_color))
+        self._set_float("uLightIntensity", float(p.light_intensity))
         self._set_float("uSpecPower", float(p.spec_power))
         self._set_float("uSpecStrength", float(p.spec_strength))
         self._set_float("uFresnel", float(p.fresnel))
@@ -1572,5 +1848,152 @@ class ShardWidget(QOpenGLWidget):
         self._texture.release(0)
         program.release()
 
+    # -- post-process passes ----------------------------------------------
+
+    def _begin_post(self, fns) -> None:
+        """State every fullscreen pass wants: no depth, no blend, VAO bound."""
+        fns.glDisable(_GL_DEPTH_TEST)
+        fns.glDisable(_GL_BLEND)
+        fns.glDepthMask(_GL_FALSE)
+        fns.glActiveTexture(_GL_TEXTURE0)
+        self._sky_vao.bind()
+
+    def _render_bloom(self, fns, width: int, height: int) -> None:
+        """Bright-pass, then separable blur. Leaves the glare in _bloom_fbos[0].
+
+        The two bloom targets ping-pong: each pass reads one and writes the
+        other, never both, since sampling a texture that is attached to the
+        bound framebuffer is undefined. An even number of blur draws per
+        iteration (one horizontal, one vertical) is what puts the result back in
+        slot 0 regardless of how many iterations run.
+        """
+        p = self.params
+        # Read back from the target rather than recomputed, so the viewport can
+        # never disagree with the buffer that was actually allocated.
+        bloom_w = self._bloom_fbos[0].width()
+        bloom_h = self._bloom_fbos[0].height()
+
+        self._begin_post(fns)
+
+        self._bloom_fbos[0].bind()
+        fns.glViewport(0, 0, bloom_w, bloom_h)
+        bright = self._post_programs["post_bright"]
+        bright.bind()
+        fns.glBindTexture(_GL_TEXTURE_2D, self._resolve_fbo.texture())
+        # The box tap is in *full*-resolution texels: this pass is reading the
+        # full-res scene even though it writes at half res.
+        self._post_set(
+            "post_bright", "uTexel", QVector2D(1.0 / width, 1.0 / height)
+        )
+        self._post_set("post_bright", "uExposure", p.exposure, is_float=True)
+        self._post_set(
+            "post_bright", "uThreshold", p.bloom_threshold, is_float=True
+        )
+        fns.glDrawArrays(_GL_TRIANGLES, 0, 3)
+        bright.release()
+
+        bloom_texel = QVector2D(1.0 / bloom_w, 1.0 / bloom_h)
+
+        # Flare next, and before the bloom blur, because both read the raw
+        # bright-pass in slot 0 and the blur is about to overwrite it.
+        self._bloom_fbos[2].bind()
+        fns.glViewport(0, 0, bloom_w, bloom_h)
+        flare = self._post_programs["post_flare"]
+        flare.bind()
+        fns.glBindTexture(_GL_TEXTURE_2D, self._bloom_fbos[0].texture())
+        self._post_set("post_flare", "uTexel", bloom_texel)
+        self._post_set("post_flare", "uStreak", p.flare_streak, is_float=True)
+        self._post_set("post_flare", "uLength", p.flare_length, is_float=True)
+        self._post_set(
+            "post_flare", "uThreshold", p.flare_threshold, is_float=True
+        )
+        fns.glDrawArrays(_GL_TRIANGLES, 0, 3)
+        flare.release()
+
+        blur = self._post_programs["post_blur"]
+        blur.bind()
+
+        # One light pass over the flare, to take the banding out of the streaks'
+        # geometrically-spaced taps and soften the ghosts' edges.
+        for dx, dy, source, target in (
+            (1.0 / bloom_w, 0.0, 2, 1),
+            (0.0, 1.0 / bloom_h, 1, 2),
+        ):
+            self._blur_pass(fns, bloom_w, bloom_h, dx, dy, source, target)
+
+        # Then the bloom itself, ping-ponging 0 <-> 1. An even number of draws
+        # per iteration is what leaves the result back in slot 0 however many
+        # iterations run.
+        for step in _BLOOM_STEPS:
+            reach = step * max(0.0, p.bloom_radius)
+            for dx, dy, source, target in (
+                (reach / bloom_w, 0.0, 0, 1),
+                (0.0, reach / bloom_h, 1, 0),
+            ):
+                self._blur_pass(fns, bloom_w, bloom_h, dx, dy, source, target)
+        blur.release()
+
+        self._sky_vao.release()
+
+    def _blur_pass(self, fns, width, height, dx, dy, source, target) -> None:
+        """One separable blur draw, scratch[source] -> scratch[target].
+
+        Source and target must differ: sampling a texture that is attached to
+        the bound framebuffer is undefined, and on some drivers it silently
+        works right up until it does not.
+        """
+        self._bloom_fbos[target].bind()
+        fns.glViewport(0, 0, width, height)
+        fns.glBindTexture(_GL_TEXTURE_2D, self._bloom_fbos[source].texture())
+        self._post_set("post_blur", "uDir", QVector2D(dx, dy))
+        fns.glDrawArrays(_GL_TRIANGLES, 0, 3)
+
+    def _composite(self, fns, width: int, height: int) -> None:
+        """Tonemap scene + glare into the widget's own framebuffer.
+
+        The last pass, and the only one that writes something a display can
+        show. Everything before it is unbounded linear radiance.
+        """
+        p = self.params
+
+        # release() on an FBO would bind 0, which is not where a QOpenGLWidget
+        # draws -- it owns its own framebuffer and Qt composites that.
+        fns.glBindFramebuffer(_GL_FRAMEBUFFER, self.defaultFramebufferObject())
+        fns.glViewport(0, 0, width, height)
+
+        self._begin_post(fns)
+
+        program = self._post_programs["post_composite"]
+        program.bind()
+        fns.glBindTexture(_GL_TEXTURE_2D, self._resolve_fbo.texture())
+        fns.glActiveTexture(_GL_TEXTURE1)
+        fns.glBindTexture(_GL_TEXTURE_2D, self._bloom_fbos[0].texture())
+        fns.glActiveTexture(_GL_TEXTURE2)
+        fns.glBindTexture(_GL_TEXTURE_2D, self._bloom_fbos[2].texture())
+
+        self._post_set("post_composite", "uExposure", p.exposure, is_float=True)
+        self._post_set(
+            "post_composite", "uBloomStrength", p.bloom, is_float=True
+        )
+        self._post_set(
+            "post_composite", "uFlareStrength", p.flare, is_float=True
+        )
+        self._post_set("post_composite", "uRolloff", p.rolloff, is_float=True)
+        fns.glDrawArrays(_GL_TRIANGLES, 0, 3)
+
+        program.release()
+        self._sky_vao.release()
+
+        # Unit 0 is where the shard's text atlas and the sky's cube expect to
+        # find themselves next frame; leaving a higher unit selected would send
+        # their bindings somewhere else entirely.
+        for unit in (_GL_TEXTURE2, _GL_TEXTURE1, _GL_TEXTURE0):
+            fns.glActiveTexture(unit)
+            fns.glBindTexture(_GL_TEXTURE_2D, 0)
+
+        fns.glDepthMask(_GL_TRUE)
+        fns.glEnable(_GL_DEPTH_TEST)
+        fns.glEnable(_GL_BLEND)
+
     def resizeGL(self, w: int, h: int) -> None:  # noqa: N802
-        pass  # projection is rebuilt from the aspect each frame
+        pass  # projection and the HDR targets are both rebuilt from paintGL

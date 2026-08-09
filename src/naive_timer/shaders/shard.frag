@@ -19,6 +19,7 @@ uniform float uShatterT;   // seconds since the break; 0 while intact
 
 uniform vec3 uLightPos;    // offscreen light, world space
 uniform vec3 uLightColor;
+uniform float uLightIntensity;  // scalar radiance multiplier; 1.0 = as tuned
 uniform vec3 uCamPos;
 uniform vec3 uGlassColor;
 uniform vec3 uTextColor;
@@ -84,9 +85,17 @@ void main() {
     // The light tints what the light drives -- diffuse, specular, Fresnel --
     // but not the ambient floor, and not the emissive numerals below, which
     // glow on their own rather than reflecting anything.
+    //
+    // uLightIntensity is a plain radiance multiplier, not a blend toward white.
+    // The whitening at high intensity is the *tonemap's* doing (see the
+    // roll-off at the bottom): a per-channel curve saturates the strongest
+    // channel first, so a hot core converges on white while the dim falloff
+    // keeps the lamp's tint. Lerping uLightColor toward #ffffff would instead
+    // bleach the penumbra too, which is not what a bright lamp does.
+    vec3 lightE = uLightColor * uLightIntensity;
     vec3 col = uGlassColor * 0.12
-             + uGlassColor * (0.40 * diff) * uLightColor;
-    col += vec3(spec) * uLightColor + fres * uGlassColor * uLightColor;
+             + uGlassColor * (0.40 * diff) * lightE;
+    col += vec3(spec) * lightE + fres * uGlassColor * lightE;
 
     // Numerals. Emissive: they light up. Etched: they frost and scatter,
     // reading as absence rather than as light.
@@ -94,7 +103,13 @@ void main() {
     vec3 frosted = mix(col, uTextColor * 0.35 + vec3(0.28) * diff, cov * uEtch);
     col = mix(col + emissive, frosted, uEtch);
 
-    float alpha = uBaseAlpha + spec + fres * 0.5 + cov * uGlow * (1.0 - uEtch);
+    // A highlight bright enough to blow out also has to *hide* what is behind
+    // it -- stars showing through a blazing white bevel read as a compositing
+    // bug, not as glass -- so the specular term carries the intensity into
+    // alpha as well. It is clamped, so this only bites once the highlight is
+    // genuinely hot.
+    float alpha = uBaseAlpha + spec * uLightIntensity + fres * 0.5
+                + cov * uGlow * (1.0 - uEtch);
     alpha = clamp(alpha + cov * uEtch * 0.25, 0.0, 1.0);
 
     // Alarm: fade toward a mostly-transparent dark red and back.
@@ -106,16 +121,25 @@ void main() {
     // of every pulse.
     const vec3 ALARM_COLOR = vec3(0.38, 0.02, 0.03);
     vec3 alarmLit = ALARM_COLOR * 0.55
-                  + ALARM_COLOR * (1.7 * diff) * uLightColor
-                  + vec3(spec) * 0.55 * uLightColor
+                  + ALARM_COLOR * (1.7 * diff) * lightE
+                  + vec3(spec) * 0.55 * lightE
                   + fres * ALARM_COLOR * 1.5;
     col = mix(col, alarmLit, uAlarm);
     alpha = mix(alpha, alpha * 0.40 + 0.08, uAlarm);
 
-    // Roll the highlights off instead of clipping them. A specular that
-    // saturates to flat white on the bevel reads as plastic; this keeps the
-    // hot edge bright but lets it retain colour.
-    col = col / (1.0 + col * 0.55);
-
+    // No tonemap here. This writes *linear radiance* into a floating-point
+    // scene buffer, and post_composite.frag maps the whole frame -- shard, sky
+    // and glare together -- exactly once, at the end.
+    //
+    // That relocation is what makes light_intensity worth having. While the
+    // curve lived here, col was squashed into 0..1 before the sky behind it was
+    // ever composited, so a highlight had nowhere to go: past radiance 2.22
+    // every bevel pixel became the same flat white and the specular lost its
+    // shape. Now the highlight keeps its true value all the way to the
+    // bright-pass, which is what lets it throw glare proportional to how hot it
+    // actually is.
+    //
+    // The alpha still matters and is still clamped: the glass blends over the
+    // sky *in this buffer*, in linear radiance rather than in display space.
     FragColor = vec4(col, clamp(alpha, 0.0, 1.0));
 }
