@@ -20,14 +20,19 @@ and verified without a display; the Qt layer is a thin view on top.
 - **Alarm at** mode: count down to a clock time — `02:54`, `14:00`, `6:30pm`
   (rolls to tomorrow if the time has already passed today)
 - Or start a countdown straight from the shell: `naive-timer --timer 30m`
-- On reaching zero: a visual flash plus a gentle chime that loops quietly for
-  ~2 minutes (configurable) or until you hit **Dismiss**
-- The chime is synthesized at runtime (no binary asset); point it at your own
-  WAV to customize
+- On reaching zero: the shard shatters, its pieces tumbling away under gravity,
+  plus a gentle chime that loops quietly for ~2 minutes (configurable) or until
+  you hit **Dismiss**
+- Both the chime and the shatter are synthesized at runtime (no binary asset);
+  point the alert at your own WAV to customize
 
-Both tabs share a naive animated pseudo-3D spinner (rotating gradient ring with
-orbiting dots) that reacts to running/alarm state — a starting point for
-fancier effects.
+**The readout itself**
+
+Both tabs render the numerals as a texture on the face of a lit glass shard,
+floating in a procedural starfield. It is drawn in **HDR** — the scene goes into
+a floating-point buffer and is tonemapped once at the end — so the highlights on
+the shard's bevels can carry far more light than the display can show, and
+spill it back as glare and lens flare. See *Tuning the shard*, below.
 
 ## Prerequisites
 
@@ -159,21 +164,45 @@ in CI and cloud containers — otherwise the shard is never actually constructed
 
 ## Tuning the shard
 
-The timer text is rendered as a texture on the face of a lit glass shard. Its
-fragment shader lives in `src/naive_timer/shaders/shard.frag` and is
-**hot-reloaded**: edit it while the app runs and it recompiles on save. A
-shader that fails to compile prints the error and leaves the previous one
-running, so you cannot break the app from there.
+The timer text is rendered as a texture on the face of a lit glass shard. Every
+shader in `src/naive_timer/shaders/` is **hot-reloaded**: edit one while the app
+runs and it recompiles on save. A shader that fails to compile prints the error
+and leaves the previous one running, so you cannot break the app from there.
+
+| file | what it draws |
+|------|---------------|
+| `shard.vert` / `shard.frag` | the glass, its numerals, and the shatter |
+| `sky.vert` / `sky.frag` | the starfield and nebula (also the cubemap bake) |
+| `post_bright.frag` | picks out the pixels brighter than white |
+| `post_blur.frag` | separable Gaussian, run repeatedly at a growing step |
+| `post_flare.frag` | lens flare: ghosts, halo and streaks |
+| `post_composite.frag` | adds the glare and applies the one tonemap |
+
+`sky.vert` is the fullscreen triangle, so every post stage shares it.
 
 ```bash
 ./launch.sh                      # the panel is on by default
 NAIVE_TIMER_TUNE=0 ./launch.sh   # ... without it
 ```
 
-That adds a panel with live sliders for every uniform — light position,
-specular power, Fresnel, glow, and an etched↔emissive blend — plus font and
+That adds a scrollable panel with live sliders for every uniform — light
+position and intensity, specular power, Fresnel, glow, an etched↔emissive blend,
+camera and sky, and the frame-wide tonemap and glare controls — plus font and
 colour pickers. **Print params** dumps the current values to the console in a
 form you can paste back into `ShardParams`.
+
+Two of those sliders are a pair worth knowing about. `light_intensity` scales
+the light's radiance, and `rolloff` sets the tonemap's shoulder — the curve
+saturates at radiance `1 / (1 - rolloff)` and clips beyond, so raising intensity
+without also raising rolloff turns the highlight into a flat white blob rather
+than a bright one. `exposure` re-seats the whole frame once both have moved.
+
+The lens flare needs no switch of its own: it is built from the same
+brighter-than-white buffer as the glare, so it fades in by itself as the
+highlights get hot enough to clear `bloom_threshold` and `flare_threshold`.
+
+Sliders ignore the mouse wheel unless you click one first — otherwise scrolling
+the panel would rewrite every value the pointer crossed.
 
 A look saved from that panel is just a JSON file, and `--json` loads one at
 startup — the shard wears it from the first frame:
@@ -197,8 +226,11 @@ it can.)
 src/naive_timer/
   stopwatch.py   # pure stopwatch model (no Qt) — unit-tested
   countdown.py   # pure countdown model + duration/alarm parsing — unit-tested
-  sound.py       # runtime chime WAV synthesis (stdlib only) — unit-tested
-  app.py         # PySide6 tabbed window + animated spinner (thin view)
+  sound.py       # runtime chime + shatter WAV synthesis (stdlib only) — unit-tested
+  app.py         # PySide6 tabbed window (thin view)
+  shard.py       # the OpenGL widget: geometry, HDR passes, ShardParams
+  tuning.py      # dev-only live slider panel (NAIVE_TIMER_TUNE=1)
+  shaders/       # GLSL, hot-reloaded on save — see "Tuning the shard"
   __main__.py    # enables `python -m naive_timer`
 tests/
   test_stopwatch.py

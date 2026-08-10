@@ -6,7 +6,8 @@ not transfer between the web/mobile app and a local terminal session. The code
 travels via git; this document travels the *reasoning* that isn't obvious from
 the diff.
 
-_Last updated: 2026-07-09, after the glass shard landed on `main`._
+_Last updated: 2026-08-10, after the HDR lighting pipeline landed on
+`feat/lighting-effects`._
 
 The project brief that started all of this is `CLAUDE.md` at the repo root —
 read it first. It states the actual goal (probing accelerated 3D across
@@ -49,7 +50,7 @@ Two features, both working:
   `25:00`) and Alarm-at mode (`02:54`, `6:30pm`, rolls to tomorrow if past).
   On zero: visual flash + a gentle chime looping ~2 min or until Dismiss.
 
-42 tests. All pass with a display; headlessly, the GL tier needs `xvfb-run`
+131 tests. All pass with a display; headlessly, the GL tier needs `xvfb-run`
 (see *Running locally*).
 
 ## Architecture (and why)
@@ -70,9 +71,9 @@ presses, nothing more.
 | `src/naive_timer/countdown.py` | Countdown model + `parse_duration`/`parse_alarm` | ✅ |
 | `src/naive_timer/sound.py` | Runtime chime WAV synthesis (stdlib `wave`) | ✅ |
 | `src/naive_timer/app.py` | PySide6 tabbed GUI (thin view) | ⚠️ constructed only |
-| `src/naive_timer/shard.py` | OpenGL glass shard; text→texture | ⚠️ geometry + texture only |
+| `src/naive_timer/shard.py` | OpenGL glass shard; text→texture; the HDR passes | ⚠️ geometry + texture only |
 | `src/naive_timer/tuning.py` | Dev-only live shader sliders | ✗ |
-| `src/naive_timer/shaders/` | `shard.vert` / `shard.frag`, hot-reloaded | ✗ |
+| `src/naive_timer/shaders/` | `shard.*`, `sky.*`, `post_*.frag`, all hot-reloaded | ✗ |
 
 Key model details worth knowing before editing:
 
@@ -123,7 +124,9 @@ by dependency, not by priority.
 - [x] **Thickness.** Extruded into a solid: front face, front bevel, side wall,
   back bevel, back face — 8 triangles per wedge. The bevel is what reads as
   glass; it rakes a highlight along the silhouette, which a flat polygon can
-  never do. Highlights roll off (Reinhard) rather than clipping to white.
+  never do. Highlights roll off (Reinhard) rather than clipping to white —
+  though that roll-off no longer happens here; it moved to the composite pass
+  when the renderer went HDR.
 - [x] **Shatter as rigid bodies.** Each wedge now carries its own pivot,
   linear velocity and angular velocity (`aPieceCenter` / `aPieceVel` /
   `aPieceAxis`), integrated in the vertex shader against elapsed `uShatterT`.
@@ -155,9 +158,14 @@ Notes for whoever touches the shatter next:
 
 - Velocities have **negative z**: pieces recede and shrink. Positive z threw
   them at the camera, where they ballooned and filled the frame.
-- `_SHATTER_CLEAR_S = 5.5` was **measured** by rendering the sequence and
-  counting non-background pixels, not guessed. Past it, `paintGL` returns
-  early — the alert runs 120 s and there is nothing left to rasterise.
+- `shatter_clear_s = 5.5` (a `ShardParams` field now, not the old
+  `_SHATTER_CLEAR_S` constant) was **measured** by rendering the sequence and
+  counting non-background pixels, not guessed. Past it, `_draw_shard` returns
+  early — the alert runs 120 s and there is nothing left to rasterise. It is
+  only an upper bound: `_all_pieces_offscreen` re-tests a few times a second and
+  stops drawing as soon as the wedges are actually gone. That test is
+  deliberately *not* latched, because a wide sway (or `sway_degrees = 180`) can
+  sweep the camera back toward a piece that had left the frame.
 - Gravity dominates the trajectory (≈4.8 units of fall by 5.5 s), so halving
   the linear speeds does *not* strand a piece on screen. If you retune, the
   test that bites is `test_pieces_are_gone_by_the_declared_clear_time`.
@@ -188,10 +196,13 @@ Render and measure; do not reason about it. Each of these caught a real bug:
 
 **Colour controls**
 
-- [ ] **Hex `RRGGBB` entry** for text/glow colour, replacing the preset combo.
-- [ ] **Adjustable light colour.** Currently white and implicit in the shader;
-  needs a `uLightColor` uniform and a picker.
-- [ ] Keep the `uEtch` blend: the wanted look is etching *plus* an understated
+- [x] **Hex `RRGGBB` entry** for text/glow colour, replacing the preset combo.
+  `_HexColorEdit` in `tuning.py`; it only applies a value once it parses, so
+  typing `#ff` on the way to `#ff8800` tints the field red rather than blanking
+  the shard.
+- [x] **Adjustable light colour.** `uLightColor` plus a picker. `light_intensity`
+  arrived later and is deliberately *separate* — see the HDR section.
+- [x] Keep the `uEtch` blend: the wanted look is etching *plus* an understated
   emissivity, not either/or.
 
 **Background** — branch `feat/starfield`
@@ -211,7 +222,8 @@ Render and measure; do not reason about it. Each of these caught a real bug:
 
 Cost: roughly **2.3–4.4 ms/frame** for the whole scene at 420x620 — a wide
 spread, because an integrated GPU with dynamic clocks gives noisy single
-samples. Call it well under half a 60 fps budget. It is clearly dearer than the
+samples. (The HDR post chain adds 0.84 ms at that size; see its own section.)
+Call it well under half a 60 fps budget. It is clearly dearer than the
 screen-space version (~0.6 ms), since 3D value noise needs 8 lattice hashes per
 octave against 2D's 4, twice over for the domain warp. Cheap enough to keep. If
 it ever matters: fewer octaves, or bake the sky into a cubemap once.
@@ -236,9 +248,13 @@ The shard no longer carries a fixed model rotation, and its `idle_spin` now
 defaults to 0: tilting the object while also orbiting the eye fights itself.
 Both passes read the same `ShardWidget.camera()`; if they ever disagreed, the
 backdrop would slide against the geometry.
-- The sky pass must run **before** `paintGL`'s early return for
-  `pieces_have_cleared`, or the backdrop disappears for the ~115 s the alert
-  outlives the shard. Pinned by a test.
+- The sky pass must run **before** the early return for `pieces_have_cleared`,
+  or the backdrop disappears for the ~115 s the alert outlives the shard. Pinned
+  by a test. That return now lives in `_draw_shard`, not in `paintGL`: once
+  there were post passes that had to run *after* the geometry, an early return
+  from `paintGL` would have taken the tonemap down with it and the window would
+  have gone black. Keep it that way — every future "draw nothing this frame"
+  case belongs in `_draw_shard`.
 - `glClearColor` is black on purpose. The sky covers every pixel, so the clear
   colour is only visible when the backdrop fails — and it should then look
   obviously broken. It was previously a dark blue-grey *brighter* than the
@@ -296,6 +312,14 @@ Compressed formats need `QMediaPlayer` + `QAudioOutput`.
 - [ ] **Hardware breadth.** `CLAUDE.md`'s stated purpose is to probe 3D across
   consumer Linux GPU stacks. Only tested on Intel Iris Xe / Mesa 25.2 /
   OpenGL 4.6 core. Untested on NVIDIA and AMD.
+
+  The HDR chain widens this gap: `RGBA16F` render targets with 4x MSAA and a
+  blit-resolve are new API surface, and the proprietary NVIDIA driver is a
+  different implementation of the same GL 3.3 core path. The `[post] targets`
+  console line reports the format, the granted sample count and the glare
+  resolution on every resize — read it first on any new box. Nothing about the
+  chain is vendor-specific in principle, so a difference there is a finding
+  worth writing down rather than an expected one.
 
 ## Asset licensing (read before adding any binary)
 
@@ -574,6 +598,131 @@ cooldowns between 4K runs. The 58.3 ms figure above may itself be heat-soaked.
 per-frame copy-back is counted, offloading to it on that machine is plausibly a
 net loss. `gpu-select.sh` should not assume discrete is faster.
 
+## The HDR lighting pipeline — branch `feat/lighting-effects`
+
+The renderer no longer draws to the screen. It draws to a floating-point buffer
+and tonemaps once, at the end:
+
+```
+  sky ─┐
+       ├─► scene: RGBA16F, 4x MSAA ─► blit-resolve ─► scratch[0]: bright-pass
+shard ─┘                    │                              │
+                            │                              ├─► flare ─► blur x2
+                            │                              └─► blur chain x6
+                            ▼                                        │
+                     composite: scene + glare + flare, then the       │
+                     one tonemap, into the widget's framebuffer ◄─────┘
+```
+
+Everything upstream of `post_composite.frag` writes **unbounded linear
+radiance**. The post chain is **11 draws** (bright 1, flare 1, flare blur 2,
+bloom blur 6, composite 1) on top of the scene's own 3. The shader files are
+listed in the README's tuning section.
+
+The blur ping-pongs between three half-resolution scratch buffers, not two:
+the flare needs the raw bright-pass that the bloom blur would otherwise
+overwrite.
+
+### Why it had to change
+
+The tonemap used to sit at the bottom of `shard.frag`, which meant the shard was
+tonemapped and the sky behind it was not, and the glass alpha-blended over the
+backdrop in *display* space rather than in radiance. That left nowhere for a
+brightness control to go. `c / (1 + 0.55c)` reaches 1.0 at radiance 2.22 and
+flat-clips beyond, so `light_intensity` erased the highlight's shape a fraction
+of the way into its own travel. Measured on the shipped preset:
+
+| `light_intensity` | result |
+| --- | --- |
+| 1.0 | as tuned |
+| 3.0 | face blowing out, warm tint desaturating toward white |
+| 6.0 | flat white blob, no shading left |
+
+Raising the shoulder recovered the gradient, but only by dimming the whole
+shard. **In one 8-bit pass, "intense" and "shaped" trade directly against each
+other** — the buffer cannot hold radiance 20 in a highlight and 0.5 in the body
+at the same time. That is the entire argument for the float buffer, and it is
+worth re-deriving before anyone is tempted to simplify this back.
+
+### Two behaviours that are emergent, not coded
+
+**The whitening is the tonemap's doing.** Per-channel Reinhard saturates the
+strongest channel first, so a hot core converges on white while the dim falloff
+keeps the light's tint. There is no blend toward `#ffffff` anywhere, and adding
+one would be a regression: it would bleach the penumbra too, which is not what a
+bright lamp does. `light_intensity` is therefore a plain scalar multiplier and
+`light_color` stays a separate control.
+
+**The lens flare gates itself on intensity.** It is built from the same
+bright-pass buffer as the glare, so at a low `light_intensity` nothing clears the
+threshold, the source is black, and every term multiplies out to zero. No
+separate enable to keep in sync. It also needs no knowledge of the scene: the
+bevel specular and the Fresnel rim are already the brightest pixels, so a
+luminance threshold finds the "sheer edges" without any edge detection.
+
+`flare_threshold` sits *on top of* `bloom_threshold` because the two want
+different sources. Glare is what a bright pixel does to its neighbours, so a
+broad lit area glowing at its edges is correct. A flare is the image of the
+aperture reproduced per lens element, so its source has to be a small searing
+*point* — fed the bloom's buffer, a blown-out facet became a blown-out ghost and
+the frame turned to soup. Related: a flare reads far better against a **domed**
+front face (`front_bulge` 1.0, `spec_power` ~140) than a flat one, because a flat
+facet spreads its specular over the whole surface and ghosts of a blob are blobs.
+
+### Cost, and the one number to tune
+
+Iris Xe, median of 20–60 frames with `glFinish()` per frame, post chain only
+(the scene itself is unchanged):
+
+| | 420x620 | 1920x1080 | 3840x2160 |
+| --- | --- | --- | --- |
+| whole post chain | **0.84 ms** | 2.89 ms | **6.33 ms** |
+| — of which blur chain | 0.31 | 1.14 | 1.26 |
+| — of which flare | 0.13 | 1.27 | 0.59 |
+| — of which composite | 0.18 | 0.72 | 2.09 |
+| — of which resolve blit | 0.10 | 1.09 | 2.77 |
+
+4K was **15.3 ms** before the glare chain became adaptive — the entire frame
+budget, spent on post, before the scene drew a triangle. Glare and flare are the
+output of a wide blur, so their cost scales with resolution while their *content*
+does not; `_bloom_divisor()` now halves until the chain is no wider than
+`_BLOOM_MAX_WIDTH` (960 px). Small windows keep the full half-resolution chain
+and stay crisp.
+
+**`_BLOOM_MAX_WIDTH` is the knob to raise on a discrete GPU.** The 6.33 ms above
+is an integrated part sharing system memory bandwidth. The visible consequence
+of the cap is that the same params give slightly softer glare on a 4K panel than
+on a 1080p one — check this before concluding a preset "looks wrong" on a bigger
+monitor.
+
+### Gotchas worth not rediscovering
+
+- **MSAA had to be re-requested.** The `setSamples(4)` in
+  `default_surface_format()` applies to the widget's own framebuffer, which the
+  scene no longer draws into. `_SCENE_SAMPLES` requests it again on the
+  offscreen target. The `[post] targets` line prints what was actually granted
+  and says so explicitly if it comes back `0x`.
+- **`release()` on an FBO binds framebuffer 0, which is not where a
+  `QOpenGLWidget` draws.** It owns its own framebuffer and Qt composites that, so
+  the composite pass must bind `defaultFramebufferObject()` by hand. The nebula
+  bake already had this trap and its comment now has company.
+- **Never sample a texture attached to the bound framebuffer.** The blur
+  ping-pongs between scratch buffers for this reason; there are three, not two,
+  because the flare needs the raw bright-pass that the bloom blur would
+  otherwise overwrite. On some drivers the aliased case silently works right up
+  until it does not.
+- **FBO textures are not guaranteed a filter mode.** Every buffer here is
+  sampled at offsets between texel centres, so `_ensure_targets` sets
+  `GL_LINEAR` and `GL_CLAMP_TO_EDGE` explicitly. Left on `NEAREST` the glare
+  comes back blocky and crawls as the camera sways.
+- **Restore the active texture unit.** The composite binds three; the shard's
+  text atlas and the sky's cubemap both expect unit 0 next frame.
+- **Saved presets shifted.** The glass now blends in linear radiance rather than
+  display space, and the sky is tonemapped where it previously was not, so stars
+  read dimmer. `exposure` and `star_brightness` are the recovery knobs. Presets
+  written before this branch simply lack the new fields and load at
+  `ShardParams` defaults, which is the intended behaviour of `apply_json_dict`.
+
 ### Animation runs on real elapsed time, not a fixed step
 
 `_tick()` used to call `advance(FRAME_MS / 1000.0)` — a constant 16 ms —
@@ -591,8 +740,9 @@ sway rather than teleport.
 
 ### Known: `default-params.json` does not apply to a normal launch
 
-`_autoload()` is a method of the tuning panel (`tuning.py:220`), and the panel
-is only constructed under `NAIVE_TIMER_TUNE=1`. So the promoted look — red
+`_autoload()` is a method of the tuning panel (`TuningPanel._autoload` — do not
+re-add a line number here, it has rotted twice), and the panel is only
+constructed under `NAIVE_TIMER_TUNE=1`. So the promoted look — red
 numerals, `star_density=178`, the tuned nebula — is what you get in tune mode,
 and a plain `python -m naive_timer` still renders `ShardParams` defaults. That
 is probably not the intent of "auto-load default-params.json"; left alone here
@@ -605,7 +755,15 @@ skips itself: Qt's `offscreen` platform has no OpenGL, and constructing a
 
 ## Branches
 
-`main` carries the shard. Active work is on **`feat/glass-volume`**
-(extrusion → rigid-body shatter → etch aliasing → colour controls). The
-starfield and the synthesized shatter sound get their own branches afterwards.
-No PR has been opened yet.
+`main` carries the shard. The glass volume, starfield, shatter sound and colour
+controls have all since landed. Active work is on **`feat/lighting-effects`**
+(light intensity → HDR pipeline → glare → lens flare → panel scrolling). No PR
+has been opened yet.
+
+Next on that branch is the shatter rework in `TODO.md`. The HDR chain is the
+enabling piece for it: "make the pieces sparkle intensely" is a per-wedge
+specular pulse, which in an 8-bit buffer clips to white and reads flat, and with
+this chain becomes glare and streaks that scale with how hot the glint actually
+is. `light_intensity` and `flare` on the break are the levers — and unlike the
+idle state, there is no readout left to keep legible, so both can go much
+further than their defaults.
