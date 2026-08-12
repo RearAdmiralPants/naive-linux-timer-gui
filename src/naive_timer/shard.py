@@ -43,6 +43,7 @@ from PySide6.QtOpenGL import (
     QOpenGLVertexArrayObject,
 )
 from PySide6.QtOpenGLWidgets import QOpenGLWidget
+from PySide6.QtWidgets import QApplication
 
 _SHADER_DIR = Path(__file__).parent / "shaders"
 
@@ -1091,6 +1092,24 @@ class ShardWidget(QOpenGLWidget):
             # while the timer ran drew the eye to the rotation instead of the
             # numerals.
             self._spin += dt * self.params.idle_spin
+
+        # Animation time keeps flowing above; only the *repaint* is held back.
+        #
+        # A modal dialog runs a nested event loop, and Qt's posted paint events
+        # are dispatched from inside it -- so the frame timers keep driving the
+        # HDR chain while the user is looking at a file chooser. Under Mesa that
+        # paint costs so much of the main thread (~80% of it: the post chain
+        # plus a DRI3 back-buffer wait in makeCurrent) that the dialog's own
+        # input handling is left a sliver, and clicks take seconds to land. The
+        # NVIDIA driver is fast enough here to hide the problem, which is why
+        # this only ever showed up on the integrated GPU.
+        #
+        # Note the dialog need not be a Qt one: the native GTK file chooser
+        # still reports through Qt as the active modal widget, which is what
+        # makes this a reliable test rather than a guess about what is on top.
+        if QApplication.activeModalWidget() is not None:
+            return
+
         self.update()
 
     # How often the early-clear geometry check runs, in seconds of shatter time.

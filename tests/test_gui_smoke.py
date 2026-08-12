@@ -884,6 +884,73 @@ class GlTest(unittest.TestCase):
         window.show()
         self.assertTrue(window.windowTitle())
 
+    def test_a_modal_dialog_stops_the_scene_repainting(self):
+        """The frame timers must not repaint while a modal dialog is up.
+
+        The Save/Load choosers are GTK3 dialogs running in-process, so
+        ``QDialog::exec()`` ends in ``gtk_dialog_run()`` -- a nested GLib main
+        loop that goes on dispatching Qt's posted paint events. Repainting from
+        inside it spent ~80% of the main thread on the HDR chain (plus a
+        blocking Mesa DRI3 buffer wait) and left the dialog's own input
+        handling a sliver: clicks took seconds to minutes to register while the
+        scene behind ran at a full 60 FPS. See docs/HANDOFF.md.
+
+        Animation *time* must keep advancing, or the scene would jump on
+        dismissal instead of resuming.
+        """
+        from PySide6.QtWidgets import QDialog
+
+        from naive_timer.app import MainWindow
+
+        window = MainWindow()
+        window.show()
+        shard = window.shards()[0]
+
+        repaints = []
+        shard.update = lambda *args: repaints.append(1)  # shadows the bound method
+
+        def repaints_from_one_frame() -> int:
+            """Repaints caused by a single advance(), and nothing else.
+
+            Measured tightly around the call because the window's own 16 ms
+            frame timers advance this same shard whenever the event loop runs,
+            which would otherwise be counted here as well.
+            """
+            before = len(repaints)
+            shard.advance(0.016)
+            return len(repaints) - before
+
+        self.assertEqual(repaints_from_one_frame(), 1, "the idle scene stopped repainting")
+
+        dialog = QDialog(window)
+        dialog.setModal(True)
+        dialog.show()
+        _app.processEvents()
+        self.assertIsNotNone(
+            QApplication.activeModalWidget(),
+            "Qt no longer reports a shown modal dialog; the guard in "
+            "ShardWidget.advance() has nothing to test against",
+        )
+
+        before = shard._elapsed
+        self.assertEqual(
+            repaints_from_one_frame(),
+            0,
+            "repainted while a modal dialog was open -- that is what starves "
+            "the file chooser and makes it look locked up",
+        )
+        self.assertGreater(
+            shard._elapsed, before, "animation time stalled instead of the paint"
+        )
+
+        dialog.hide()
+        _app.processEvents()
+        self.assertEqual(
+            repaints_from_one_frame(),
+            1,
+            "the scene never resumed once the dialog closed",
+        )
+
     def test_startup_opens_no_audio_stream(self):
         """An idle app must hold no client stream on the default sink.
 

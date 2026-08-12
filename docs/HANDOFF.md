@@ -471,6 +471,50 @@ back for exactly that purpose. `tests/test_gui_smoke.py::
 test_the_pipewire_audio_backend_is_not_in_use` will fail while it is exported —
 deliberately.
 
+## The "Save dialog locks up" bug (fixed 2026-08-12)
+
+**The render loop was starving the file dialog.** Save/Load from the tuning
+panel opened a chooser that took *seconds to minutes* to answer a click, while
+the app behind it kept animating at a full 60 FPS. It only ever showed up on the
+integrated GPU, which turned out to be the clue rather than a coincidence.
+
+`QFileDialog.getSaveFileName` is not a Qt dialog here. Under Cinnamon, Qt loads
+the **gtk3 platform theme**, so the chooser is a GTK3 dialog running in-process,
+and `QDialog::exec()` ends in `gtk_dialog_run()` — a *nested GLib main loop*.
+Qt's posted events are dispatched from inside that loop, so the two 16 ms frame
+timers went right on repainting the scene while the dialog was up.
+
+A native-stack profile (`py-spy record --native`) while it was hung:
+
+| inside the dialog's own event loop | before | after |
+|---|---|---|
+| `sendPostedEvents` → `paintAndFlush` (repainting the shard) | **79%** | 0% |
+| `loader_dri3_get_buffers` (Mesa back-buffer wait) | 15% | 0% |
+| GDK/GTK event dispatch | **0%** | — |
+| idle in `poll` | — | 88% |
+
+So the dialog's input handling was competing with the whole HDR chain for the
+main thread and losing. Mesa makes it far worse than NVIDIA: `makeCurrent`
+enters `loader_dri3_get_buffers`, which *blocks* in `xcb_wait_for_special_event`
+waiting on the X server for a free buffer. The NVIDIA driver never takes that
+path, and its frames are cheap enough to leave gaps — hence "only on the iGPU".
+
+The fix is one guard in `ShardWidget.advance()`: skip the repaint while
+`QApplication.activeModalWidget()` is set. Animation *time* still advances, so
+nothing drifts; only the paint is held back, and the scene resumes on the next
+tick. Click latency went from seconds to 116 ms.
+
+**The load-bearing detail:** a native GTK dialog still registers through Qt as
+the active modal widget (`QDialog::exec()` runs before handing off to GTK).
+That is what makes the guard a fact rather than a guess about what is on top.
+
+**If you add another animation driver, it needs the same guard.** Anything that
+calls `update()` on a timer will re-create this, and it will look like a dialog
+bug rather than a render-loop bug. A symptom worth recognising: while starved,
+queued clicks arrived so late that a second click on **Save…** re-entered
+`_save()` and opened a second chooser on top of the first. That stopped
+happening once the repaint was held back; it was never a separate bug.
+
 ## Running locally
 
 ```bash
