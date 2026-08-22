@@ -861,6 +861,139 @@ class CurvedFrontTest(unittest.TestCase):
             )
 
 
+class TerrainTest(unittest.TestCase):
+    """The ice-ball terrain displacement and its normal-map bake.
+
+    The invariants that matter: the default (amplitude 0) must reproduce the
+    pre-terrain geometry byte for byte, the displacement must stay welded to
+    the bevel ring and bounded by the amplitude, and the wedges must remain
+    closed solids when displaced.
+    """
+
+    AMP = 0.2
+    SCALE = 2.5
+    ROUGHNESS = 0.5
+    SEED = 7.0
+
+    def test_defaults_reproduce_pre_terrain_geometry(self):
+        """Every existing tuned config must render identically after this lands."""
+        from naive_timer.shard import _build_geometry
+
+        for subdiv in range(6):
+            self.assertEqual(
+                _build_geometry(subdiv, 0.65),
+                _build_geometry(subdiv, 0.65, 0.0),
+            )
+        self.assertEqual(_build_geometry(), _build_geometry(0, 0.0))
+
+    def test_envelope_is_zero_at_rim_and_apex(self):
+        """The cap must stay welded to the bevel ring and keep a smooth apex."""
+        from naive_timer.shard import (
+            _BEVEL_Z, _cap_point_and_normal, _front_profile_z,
+        )
+
+        inset_a = (-0.95 * 0.9, 0.26 * 0.9, _BEVEL_Z)
+        inset_b = (-0.52 * 0.9, 0.88 * 0.9, _BEVEL_Z)
+        rim_a = (-0.95, 0.26, 0.0)
+        rim_b = (-0.52, 0.88, 0.0)
+
+        # Inset ring (u=1): displaced point must sit exactly on _BEVEL_Z.
+        for t in (0.0, 0.3, 0.7, 1.0):
+            point, _n = _cap_point_and_normal(
+                1.0, t, inset_a, inset_b, rim_a, rim_b, 0.65,
+                self.AMP, self.SCALE, self.ROUGHNESS, self.SEED,
+            )
+            self.assertAlmostEqual(point[2], _BEVEL_Z, places=5)
+
+        # Apex (u=0): undisplaced, normal +z.
+        point, normal = _cap_point_and_normal(
+            0.0, 0.0, inset_a, inset_b, rim_a, rim_b, 0.65,
+            self.AMP, self.SCALE, self.ROUGHNESS, self.SEED,
+        )
+        apex_z = _front_profile_z(0.0, 0.0, 0.0, 0.65)
+        self.assertEqual(point, (0.0, 0.0, apex_z))
+        self.assertEqual(normal, (0.0, 0.0, 1.0))
+
+    def test_displacement_is_bounded_by_amplitude(self):
+        from naive_timer.shard import _build_geometry
+
+        flat = _build_geometry(4, 0.65, 0.0)
+        rough = _build_geometry(
+            4, 0.65, self.AMP, self.SCALE, self.ROUGHNESS, self.SEED
+        )
+        self.assertEqual(len(flat), len(rough))
+        stride = 18
+        for v in range(0, len(flat), stride):
+            dz = abs(rough[v + 2] - flat[v + 2])
+            self.assertLessEqual(dz, self.AMP + 1e-6)
+
+    def test_geometry_is_deterministic_with_terrain(self):
+        from naive_timer.shard import _build_geometry
+
+        args = (3, 0.65, self.AMP, self.SCALE, self.ROUGHNESS, self.SEED)
+        self.assertEqual(_build_geometry(*args), _build_geometry(*args))
+
+    def test_wedges_stay_closed_solids_with_terrain(self):
+        """Displacement lives in the shared ring points, so the bevel and cut
+        faces stay welded -- verify the shell never opens."""
+        from collections import Counter
+
+        from naive_timer.shard import (
+            _FLOATS_PER_VERTEX as stride, _OUTLINE, _build_geometry,
+            _tris_per_wedge,
+        )
+
+        def key(v):
+            return tuple(round(c, 5) for c in v)
+
+        subdiv = 2
+        per = _tris_per_wedge(subdiv)
+        data = _build_geometry(
+            subdiv, 0.65, self.AMP, self.SCALE, self.ROUGHNESS, self.SEED
+        )
+        for wedge in range(len(_OUTLINE)):
+            start = wedge * per * 3
+            edges = Counter()
+            for t in range(per):
+                pts = [
+                    key(data[(start + t * 3 + k) * stride:
+                             (start + t * 3 + k) * stride + 3])
+                    for k in range(3)
+                ]
+                for a, b in ((0, 1), (1, 2), (2, 0)):
+                    edges[frozenset((pts[a], pts[b]))] += 1
+            open_edges = [e for e, n in edges.items() if n != 2]
+            self.assertEqual(open_edges, [], f"wedge {wedge} opened by terrain")
+
+    def test_normal_map_bakes(self):
+        from naive_timer.shard import _TERRAIN_TEX_SIZE, bake_terrain_normal_map
+
+        img = bake_terrain_normal_map(
+            self.AMP, self.SCALE, self.ROUGHNESS, self.SEED, 0.6
+        )
+        self.assertEqual(img.width(), _TERRAIN_TEX_SIZE)
+        self.assertEqual(img.height(), _TERRAIN_TEX_SIZE)
+
+        def sample(image):
+            return [
+                image.pixelColor(x, y)
+                for y in range(0, image.height(), 16)
+                for x in range(0, image.width(), 16)
+            ]
+
+        # With terrain: the normals must vary across the map.
+        px = sample(img)
+        self.assertGreater(len({c.red() for c in px}), 4)
+        self.assertGreater(len({c.green() for c in px}), 4)
+
+        # Flat (amplitude 0): near-flat tangent normal (128, 128, 255).
+        flat = bake_terrain_normal_map(0.0, self.SCALE, self.ROUGHNESS, self.SEED, 0.6)
+        for c in sample(flat):
+            self.assertLess(abs(c.red() - 128), 2)
+            self.assertLess(abs(c.green() - 128), 2)
+            self.assertGreater(c.blue(), 250)
+
+
 @needs_qt
 class GlTest(unittest.TestCase):
     """Needs a real GL context. Run under xvfb-run when there's no display."""

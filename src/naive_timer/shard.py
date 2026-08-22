@@ -320,6 +320,18 @@ class ShardParams:
     front_subdiv: float = 3.0
     front_bulge: float = 0.65
 
+    # Ice-ball terrain on the front face, same rebuild-not-uniform family as
+    # the two above. amplitude is the max z offset of the displacement (0.0
+    # reproduces the pre-terrain geometry byte for byte), scale sets the noise
+    # frequency, roughness mixes in the finer octaves, seed picks the pattern.
+    # detail drives only the normal-map texture's micro octave -- it changes
+    # lighting, not vertices, so it is not part of the geometry key.
+    terrain_amplitude: float = 0.0
+    terrain_scale: float = 2.5
+    terrain_roughness: float = 0.5
+    terrain_seed: float = 7.0
+    terrain_detail: float = 0.6
+
     # Camera. It sways back and forth across the front of the shard, always
     # looking at it -- rather than orbiting all the way round, which would
     # leave the numerals edge-on or mirrored for half of every cycle. This is a
@@ -552,13 +564,18 @@ def _front_profile_z(u: float, inset_r: float, steepness: float, bulge: float):
     return flat + bulge * (curved - flat)
 
 
-def _front_patch(inset_a, inset_b, rim_a, rim_b, subdiv: int, bulge: float):
+def _front_patch(inset_a, inset_b, rim_a, rim_b, subdiv: int, bulge: float,
+                 amp: float = 0.0, scale: float = 2.5, roughness: float = 0.5,
+                 seed: float = 7.0):
     """Ring-subdivided front cap for one wedge.
 
     ``rings[j]`` holds j+1 points, ring 0 being the shared apex and ring n the
     chain along the inset edge. The two radial chains ``rings[j][0]`` and
     ``rings[j][j]`` are the wedge's cut boundaries; the radial cut faces must
     reuse them vertex-for-vertex or the solid opens up along every cut.
+
+    The terrain displacement lives in _cap_point_and_normal, so every consumer
+    of these rings (bevel strip, cut faces) stays welded to the displaced cap.
     """
     n = _rings(subdiv)
     rings, normals = [], {}
@@ -568,7 +585,8 @@ def _front_patch(inset_a, inset_b, rim_a, rim_b, subdiv: int, bulge: float):
         for k in range(j + 1):
             t = k / j if j else 0.0
             point, normal = _cap_point_and_normal(
-                u, t, inset_a, inset_b, rim_a, rim_b, bulge
+                u, t, inset_a, inset_b, rim_a, rim_b, bulge,
+                amp, scale, roughness, seed,
             )
             row.append(point)
             normals[_normal_key(point)] = normal
@@ -614,7 +632,90 @@ def _profile_dz_du(u, inset_r, steepness, bulge):
     return flat + bulge * (curved - flat)
 
 
-def _cap_point_and_normal(u, t, inset_a, inset_b, rim_a, rim_b, bulge):
+# --- Ice-ball terrain heightfield ------------------------------------------
+#
+# A procedural, C1-smooth heightfield over the front face, used two ways:
+# displacing the cap's vertices (macro relief, so the etched numerals follow
+# the contours with true parallax) and baking a normal map for micro detail
+# that tessellation cannot resolve. Both consume the SAME function, so the
+# lighting agrees with the geometry.
+
+def _terrain_envelope(u: float, r: float) -> float:
+    """Displacement envelope: 0 at the inset ring (u=1) and at the apex (r=0).
+
+    The u=1 zero is load-bearing -- it keeps the cap welded to the front bevel
+    strip and the radial cut faces, which reuse the inset-ring vertices.
+    """
+    if u <= 0.0 or u >= 1.0:
+        return 0.0
+    return 4.0 * (u - u * u) * (r - r * r)
+
+
+def _terrain_hash2(ix: int, iy: int, seed: float) -> float:
+    """Deterministic lattice random in [0,1). Same sin-hash family as _hash01."""
+    x = math.sin(ix * 127.1 + iy * 311.7 + seed * 74.7) * 43758.5453
+    return x - math.floor(x)
+
+
+def _terrain_value_noise(x: float, y: float, seed: float):
+    """Value noise at (x, y) plus its analytic gradient. C1 (quintic fade)."""
+    ix, iy = int(math.floor(x)), int(math.floor(y))
+    fx, fy = x - ix, y - iy
+    # Quintic fade: value AND first two derivatives zero at the lattice points,
+    # so the noise is C1 and its gradient is exact.
+    qx = fx * fx * fx * (fx * (fx * 6.0 - 15.0) + 10.0)
+    qy = fy * fy * fy * (fy * (fy * 6.0 - 15.0) + 10.0)
+    dxq = 30.0 * fx * fx * (fx * fx - 2.0 * fx + 1.0)
+    dyq = 30.0 * fy * fy * (fy * fy - 2.0 * fy + 1.0)
+    n00 = _terrain_hash2(ix, iy, seed)
+    n10 = _terrain_hash2(ix + 1, iy, seed)
+    n01 = _terrain_hash2(ix, iy + 1, seed)
+    n11 = _terrain_hash2(ix + 1, iy + 1, seed)
+    v = (n00 * (1.0 - qx) + n10 * qx) * (1.0 - qy) \
+      + (n01 * (1.0 - qx) + n11 * qx) * qy
+    dvx = (n10 - n00) * dxq * (1.0 - qy) + (n11 - n01) * dxq * qy
+    dvy = (n01 - n00) * dyq * (1.0 - qx) + (n11 - n10) * dyq * qx
+    return v, dvx, dvy
+
+
+def _terrain_height(x: float, y: float, scale: float, roughness: float, seed: float):
+    """Heightfield in face space plus analytic gradient. Three octaves."""
+    total = gx = gy = 0.0
+    for octave in range(3):
+        f = scale * (2.03 ** octave)   # 2.03, not 2.0: avoids axis banding
+        amp = 0.5 * (roughness ** octave)
+        v, dvx, dvy = _terrain_value_noise(x * f + seed * 17.31, y * f - seed * 9.17, seed)
+        total += amp * v
+        gx += amp * dvx * f
+        gy += amp * dvy * f
+    return total, gx, gy
+
+
+def _terrain_displacement(x, y, u, r, amplitude, scale, roughness, seed):
+    """(dz, d(dz)/dx, d(dz)/dy) at face point (x, y), cap params (u, r).
+
+    Zero when amplitude <= 0 or the envelope is 0, so default parameters
+    reproduce the pre-terrain geometry byte for byte.
+    """
+    if amplitude <= 0.0:
+        return (0.0, 0.0, 0.0)
+    h, gx, gy = _terrain_height(x, y, scale, roughness, seed)
+    env = _terrain_envelope(u, r)
+    # d(env)/dr with the u factor held; dr/dx = x/r (0 at the apex).
+    de_dr = 4.0 * (u - u * u) * (1.0 - 2.0 * r)
+    if r <= 1e-6:
+        drdx = dry = 0.0
+    else:
+        drdx, dry = x / r, y / r
+    return (
+        amplitude * env * h,
+        amplitude * (env * gx + de_dr * drdx * h),
+        amplitude * (env * gy + de_dr * dry * h),
+    )
+
+
+def _cap_point_and_normal(u, t, inset_a, inset_b, rim_a, rim_b, bulge,
+                          amp=0.0, scale=2.5, roughness=0.5, seed=7.0):
     """Surface point and its exact normal at parameters (u, t).
 
     Normals are analytic rather than averaged from the facets. Facet averaging
@@ -637,16 +738,28 @@ def _cap_point_and_normal(u, t, inset_a, inset_b, rim_a, rim_b, bulge):
 
     inset_r, steepness = profile(t)
     z = _front_profile_z(u, inset_r, steepness, bulge)
-    point = (bx * u, by * u, z)
+    px, py = bx * u, by * u
+    r = math.hypot(px, py)
+    dz, dhdpx, dhdpy = _terrain_displacement(
+        px, py, u, r, amp, scale, roughness, seed
+    )
+    point = (px, py, z + dz)
 
     # The apex is a pole: dP/dt vanishes there and the cross product is
     # undefined. Its normal is +z by construction -- the profile's apex
     # tangent is horizontal, which is exactly what removes the cone point.
+    # (The terrain envelope is 0 at the apex too, so dz = 0 here.)
     if u <= 0.0:
         return point, (0.0, 0.0, 1.0)
 
-    # dP/du along the radius.
-    du = (bx, by, _profile_dz_du(u, inset_r, steepness, bulge))
+    # dP/du along the radius. The heightfield's slope folds in by chain rule:
+    # moving du along the radius (bx, by) changes dz by its gradient dotted
+    # with that direction. Same for the ring tangent below.
+    du = (
+        bx,
+        by,
+        _profile_dz_du(u, inset_r, steepness, bulge) + dhdpx * bx + dhdpy * by,
+    )
     # dP/dt around the ring. z varies with t only through the outline's local
     # radius; a central difference on that is exact to rounding and far
     # clearer than differentiating hypot through the lerp.
@@ -657,11 +770,9 @@ def _cap_point_and_normal(u, t, inset_a, inset_b, rim_a, rim_b, bulge):
         _front_profile_z(u, hi_r, hi_s, bulge)
         - _front_profile_z(u, lo_r, lo_s, bulge)
     ) / (2.0 * h)
-    dt = (
-        u * (inset_b[0] - inset_a[0]),
-        u * (inset_b[1] - inset_a[1]),
-        dz_dt,
-    )
+    dtx = u * (inset_b[0] - inset_a[0])
+    dty = u * (inset_b[1] - inset_a[1])
+    dt = (dtx, dty, dz_dt + dhdpx * dtx + dhdpy * dty)
 
     nx = du[1] * dt[2] - du[2] * dt[1]
     ny = du[2] * dt[0] - du[0] * dt[2]
@@ -788,7 +899,9 @@ def _wedge_bounds(data: array.array) -> list:
     return bounds
 
 
-def _build_geometry(subdiv: int = 0, bulge: float = 0.0) -> array.array:
+def _build_geometry(subdiv: int = 0, bulge: float = 0.0, amp: float = 0.0,
+                    scale: float = 2.5, roughness: float = 0.5,
+                    seed: float = 7.0) -> array.array:
     """Extrude the outline into a solid, one wedge per edge.
 
     Each wedge contributes a front face, a front bevel, a side wall, a back
@@ -796,13 +909,17 @@ def _build_geometry(subdiv: int = 0, bulge: float = 0.0) -> array.array:
     makes a wedge a real chunk: the whole solid piece tumbles together, rather
     than the front skin peeling off its own side wall.
 
-    ``subdiv`` and ``bulge`` curve the front face. Defaults reproduce the
-    original six flat triangles byte for byte.
+    ``subdiv`` and ``bulge`` curve the front face; ``amp`` etches the ice-ball
+    terrain into it (0.0 = no terrain). Defaults reproduce the original six
+    flat triangles byte for byte.
 
     Interleaved per vertex:
         pos(3) normal(3) uv(2) pieceCenter(3) pieceVel(3) pieceAxis(3) = 17
     """
     data = array.array("f")
+    # The terrain envelope is 0 at the apex, so this stays undisplaced -- but
+    # it feeds the wedge centroids, so if the apex fade is ever removed this
+    # must move with it.
     apex_z = _front_profile_z(0.0, 0.0, 0.0, bulge)
     front_apex = (0.0, 0.0, apex_z)
     back_apex = (0.0, 0.0, -_THICKNESS - _BACK_PEAK_Z)
@@ -823,6 +940,7 @@ def _build_geometry(subdiv: int = 0, bulge: float = 0.0) -> array.array:
             (bx, by, 0.0),
             subdiv,
             bulge,
+            amp, scale, roughness, seed,
         )
         _accumulate_patch_normals(slot_normals, accum)
         patches.append(rings)
@@ -991,6 +1109,83 @@ def render_text_image(text: str, params: ShardParams) -> QImage:
     return image
 
 
+# --- Terrain normal-map bake ------------------------------------------------
+
+_TERRAIN_TEX_SIZE = 512
+
+
+def _terrain_face_radius() -> float:
+    """Mean distance of the inset ring from the face centre.
+
+    The envelope's r is this radius normalised to 1, so the displacement fades
+    to exactly 0 at the bevel seam no matter which outline edge a point sits
+    on. (The outline is irregular; using the mean keeps the fade smooth across
+    edges rather than rippling with the local radius.)
+    """
+    total = 0.0
+    for x, y in _OUTLINE:
+        total += math.hypot(x, y) * _BEVEL_INSET
+    return total / len(_OUTLINE)
+
+
+def bake_terrain_normal_map(amp, scale, roughness, seed, detail) -> QImage:
+    """Tangent-space normal map of the terrain over the face's bounding square.
+
+    Same heightfield as the geometry displacement, plus one finer octave that
+    only the texture resolves (micro relief). RGB = normal * 0.5 + 0.5,
+    A = height. UVs are planar (_face_uv), so texel (i, j) maps to face
+    x = (u - 0.5) * 2 / _FACE_UV_SCALE, y = (0.5 - v) * 2 / _FACE_UV_SCALE.
+
+    No GL context required -- the offscreen Qt platform has none.
+    """
+    size = _TERRAIN_TEX_SIZE
+    face_r = _terrain_face_radius()
+    # One face unit across the texture; the central-difference step in face
+    # units, and its inverse for converting a face-space gradient to per-texel.
+    half = 1.0 / _FACE_UV_SCALE
+    step = (2.0 * half) / size
+
+    def height(x: float, y: float):
+        h, _gx, _gy = _terrain_height(x, y, scale, roughness, seed)
+        if detail > 0.0:
+            # The micro octave: 4x the base frequency, beyond what level-5
+            # tessellation resolves, so it lives only in the lighting.
+            m, _mx, _my = _terrain_value_noise(
+                x * scale * 4.0 + seed * 31.7, y * scale * 4.0 - seed * 23.9, seed
+            )
+            h += detail * 0.5 * m
+        return amp * h
+
+    buf = bytearray(size * size * 4)
+    for j in range(size):
+        v = (j + 0.5) / size
+        y = (0.5 - v) * 2.0 * half
+        row = j * size * 4
+        for i in range(size):
+            u = (i + 0.5) / size
+            x = (u - 0.5) * 2.0 * half
+            r = math.hypot(x, y) / face_r
+            # The map covers the whole square; outside the inset ring the
+            # geometry has no displacement, so fade the detail out with the
+            # same radial envelope the cap uses (the u factor held at its
+            # mid-value of 0.25).
+            env = 4.0 * 0.25 * (r - r * r) if 0.0 < r < 1.0 else 0.0
+            hx = (height(x + step, y) - height(x - step, y)) / (2.0 * step) * env
+            hy = (height(x, y + step) - height(x, y - step)) / (2.0 * step) * env
+            # Slope-to-normal: the map's xy are world xy on a near-front-facing
+            # cap, so a slope of s tilts the normal by (-s, -s, 1).
+            length = math.sqrt(hx * hx + hy * hy + 1.0)
+            o = row + i * 4
+            buf[o] = int((-hx / length * 0.5 + 0.5) * 255) & 0xFF
+            buf[o + 1] = int((-hy / length * 0.5 + 0.5) * 255) & 0xFF
+            buf[o + 2] = int((1.0 / length * 0.5 + 0.5) * 255) & 0xFF
+            h = max(0.0, min(1.0, height(x, y)))
+            buf[o + 3] = int(h * 255) & 0xFF
+
+    image = QImage(bytes(buf), size, size, size * 4, QImage.Format_RGBA8888)
+    return image.copy()
+
+
 class ShardWidget(QOpenGLWidget):
     """Drop-in replacement for SpinnerWidget, plus ``set_text``."""
 
@@ -1025,6 +1220,8 @@ class ShardWidget(QOpenGLWidget):
         self._elapsed = 0.0
         self._texture: QOpenGLTexture | None = None
         self._text_dirty = True
+        self._terrain_texture: QOpenGLTexture | None = None
+        self._terrain_tex_dirty = True
         self._shaders_dirty = False
 
         # Early-clear state: the shatter's fixed timeout is only an upper bound,
@@ -1238,8 +1435,23 @@ class ShardWidget(QOpenGLWidget):
         self._rebuild_geometry()
         self.update()
 
+    def _terrain_values(self):
+        """Clamped (amp, scale, roughness, seed, detail) for terrain.
+
+        Shared by the geometry rebuild and the normal-map bake so the two can
+        never drift apart.
+        """
+        p = self.params
+        return (
+            max(0.0, min(0.25, float(p.terrain_amplitude))),
+            max(0.5, min(8.0, float(p.terrain_scale))),
+            max(0.0, min(1.0, float(p.terrain_roughness))),
+            float(p.terrain_seed),
+            max(0.0, min(1.0, float(p.terrain_detail))),
+        )
+
     def _rebuild_geometry(self) -> bool:
-        """Rebuild the vertex data if the curvature parameters moved.
+        """Rebuild the vertex data if the curvature/terrain parameters moved.
 
         Keyed on the values rather than rebuilt unconditionally: refresh_params
         fires on *every* slider, and re-tessellating plus re-uploading the
@@ -1249,14 +1461,18 @@ class ShardWidget(QOpenGLWidget):
         """
         subdiv = max(0, min(_FRONT_SUBDIV_MAX, int(round(self.params.front_subdiv))))
         bulge = max(0.0, min(1.0, float(self.params.front_bulge)))
-        key = (subdiv, bulge)
+        amp, scale, roughness, seed, _detail = self._terrain_values()
+        key = (subdiv, bulge, amp, scale, roughness, seed)
         if key == self._geometry_key:
             return False
 
         self._geometry_key = key
-        self._vertex_data = _build_geometry(subdiv, bulge)
+        self._vertex_data = _build_geometry(subdiv, bulge, amp, scale, roughness, seed)
         self._vertex_count = len(self._vertex_data) // _FLOATS_PER_VERTEX
         self._geometry_dirty = True
+        # The normal map is baked from the same heightfield; re-bake it
+        # whenever the terrain itself moves (detail alone has its own flag).
+        self._terrain_tex_dirty = True
         self._wedge_bounds = _wedge_bounds(self._vertex_data)
         return True
 
@@ -1307,12 +1523,18 @@ class ShardWidget(QOpenGLWidget):
                 "uGlassColor", "uTextColor",
                 "uSpecPower", "uSpecStrength", "uFresnel", "uGlow",
                 "uEtch", "uEtchDepth", "uBaseAlpha",
+                "uTerrain", "uTerrainStrength",
                 "uAlarm", "uShatterT",
                 "uGravity",
                 "uSpin",
                 "uSpinAtBreak",
             )
         }
+        # The normal map lives on texture unit 2; unit 0 is the text atlas and
+        # unit 1 the sky's nebula cube.
+        loc = self._uniforms.get("uTerrain", -1)
+        if loc >= 0:
+            program.setUniformValue1i(loc, 2)
         program.release()
         self._bind_attributes()
         print("[shard] shaders reloaded")
@@ -1724,6 +1946,18 @@ class ShardWidget(QOpenGLWidget):
         self._texture.setWrapMode(QOpenGLTexture.ClampToEdge)
         self._text_dirty = False
 
+    def _upload_terrain(self) -> None:
+        if self._terrain_texture is not None:
+            self._terrain_texture.destroy()
+        amp, scale, roughness, seed, detail = self._terrain_values()
+        self._terrain_texture = QOpenGLTexture(
+            bake_terrain_normal_map(amp, scale, roughness, seed, detail)
+        )
+        self._terrain_texture.setMinificationFilter(QOpenGLTexture.Linear)
+        self._terrain_texture.setMagnificationFilter(QOpenGLTexture.Linear)
+        self._terrain_texture.setWrapMode(QOpenGLTexture.ClampToEdge)
+        self._terrain_tex_dirty = False
+
     # -- QOpenGLWidget ----------------------------------------------------
 
     def initializeGL(self) -> None:  # noqa: N802 (Qt naming)
@@ -1756,6 +1990,8 @@ class ShardWidget(QOpenGLWidget):
             self._load_post_programs()
         if self._text_dirty:
             self._upload_text()
+        if self._terrain_tex_dirty:
+            self._upload_terrain()
         if self._geometry_dirty:
             self._upload_geometry()
 
@@ -1828,6 +2064,8 @@ class ShardWidget(QOpenGLWidget):
 
         program.bind()
         self._texture.bind(0)
+        if self._terrain_texture is not None:
+            self._terrain_texture.bind(2)
         self._set("uText", 0)
         self._set("uModel", model)
         self._set("uView", view)
@@ -1845,6 +2083,13 @@ class ShardWidget(QOpenGLWidget):
         self._set_float("uGlow", float(p.glow))
         self._set_float("uEtch", float(p.etch))
         self._set_float("uEtchDepth", float(p.etch_depth))
+        # 0 while the terrain amplitude is 0, so default configs render
+        # identically to pre-terrain builds even with a baked map bound.
+        _detail = max(0.0, min(1.0, float(p.terrain_detail)))
+        self._set_float(
+            "uTerrainStrength",
+            _detail if p.terrain_amplitude > 0.0 else 0.0,
+        )
         self._set_float("uBaseAlpha", float(p.base_alpha))
         self._set_float("uAlarm", float(alarm))
         self._set_float("uShatterT", float(self._shatter_t))
@@ -1864,6 +2109,10 @@ class ShardWidget(QOpenGLWidget):
             fns.glDrawArrays(_GL_TRIANGLES, 0, self._vertex_count)
         fns.glDisable(_GL_CULL_FACE)
         self._vao.release()
+        if self._terrain_texture is not None:
+            self._terrain_texture.release(2)
+            # The post passes expect unit 0 active when they start.
+            fns.glActiveTexture(_GL_TEXTURE0)
         self._texture.release(0)
         program.release()
 

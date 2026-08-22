@@ -32,6 +32,9 @@ uniform float uEtch;          // 0 = emissive/lit, 1 = etched into the glass
 uniform float uEtchDepth;     // how sharply the engraving tilts the normal
 uniform float uBaseAlpha;
 
+uniform sampler2D uTerrain;      // ice-ball micro relief, normals in RGB
+uniform float uTerrainStrength;  // 0 = off (terrain amplitude is 0)
+
 uniform float uAlarm;         // 0..1, pulses after the countdown hits zero
 
 void main() {
@@ -72,6 +75,16 @@ void main() {
 
         vec2 grad = vec2(right - left, up - down) * 0.5;
         N = normalize(N - uEtch * vec3(grad * uEtchDepth, 0.0));
+    }
+
+    // Ice-ball micro relief: tangent-space normal from the baked map. The cap
+    // is near-front-facing and UVs are planar, so treating the map's xy as
+    // world xy is a good approximation -- the same assumption the etch bump
+    // makes above (more approximate once the geometry itself is displaced,
+    // which is fine for a stylised surface).
+    if (uTerrainStrength > 0.0) {
+        vec3 tn = texture(uTerrain, vUV).rgb * 2.0 - 1.0;
+        N = normalize(N + uTerrainStrength * vec3(tn.x, tn.y, 0.0));
     }
 
     vec3 L = normalize(uLightPos - vWorld);

@@ -106,7 +106,7 @@ _SLIDERS = [
     ("fresnel", 0.0, 2.0),
     ("glow", 0.0, 2.0),
     ("etch", 0.0, 1.0),
-    ("etch_depth", 0.0, 12.0),
+    ("etch_depth", 0.0, 36.0),
     ("base_alpha", 0.0, 1.0),
 ]
 
@@ -116,6 +116,13 @@ _SLIDERS = [
 _GEOMETRY_SLIDERS = [
     ("front_subdiv", 0.0, 5.0, 1),
     ("front_bulge", 0.0, 1.0),
+    # Ice-ball terrain. amplitude/scale/roughness/seed retessellate the cap;
+    # detail re-bakes only the normal map (lighting, not vertices).
+    ("terrain_amplitude", 0.0, 0.25),
+    ("terrain_scale", 0.5, 8.0),
+    ("terrain_roughness", 0.0, 1.0),
+    ("terrain_seed", 0.0, 64.0, 1),
+    ("terrain_detail", 0.0, 1.0),
 ]
 
 _SHATTER_SLIDERS = [
