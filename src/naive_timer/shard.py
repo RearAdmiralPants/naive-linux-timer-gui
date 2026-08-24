@@ -222,20 +222,71 @@ _FLOATS_PER_VERTEX = 18
 # slider whose useful range is the first 0.5% of its travel is a bad slider.
 _FRONT_SUBDIV_MAX = 5
 
+# Crystal density. front_subdiv + crystal_density is clamped to
+# _CRYSTAL_SUBDIV_MAX, which is deliberately the same ceiling as the smooth
+# cap: at level 5 the cap is 32 rings, so the crystal field is 1024 spikes per
+# wedge -- 18k flat facets across the shard. The limit here is *build* time,
+# not frame time. _build_geometry is Python appending floats one triangle at a
+# time; a level higher would quadruple that into a visible stall every time
+# the slider moves, to produce facets small enough to alias, which is the one
+# thing the whole feature is trying not to do.
+_CRYSTAL_SUBDIV_MAX = 5
+_CRYSTAL_DENSITY_MAX = 2
 
-def _rings(subdiv: int) -> int:
+# How far a spike's tip may wander off its facet's centroid, as a fraction of
+# the barycentric weights. Zero puts every tip dead centre, and a field of
+# perfectly centred spikes on a regular ring grid reads as a machined pattern
+# rather than as crystal. Held at a constant instead of exposed: it is a
+# texture, not a look, and it has no useful setting other than "some".
+_CRYSTAL_JITTER = 1.2
+
+# Aspect of the crystal_clear ellipse. The numerals are drawn into a 3:1
+# texture that _face_uv projects onto a square patch of the face, so the glyphs
+# occupy the full width but only the middle third of the height; a circular
+# clear zone big enough to spare them would spare most of the cap with it.
+_CRYSTAL_CLEAR_ASPECT = 0.34
+# Planar distance over which the clear zone ramps back up to full crystal.
+_CRYSTAL_CLEAR_FEATHER = 0.35
+
+# Salt for the per-spike hashes, and a per-wedge stride so wedge 3's tenth
+# triangle does not draw the same numbers as wedge 0's.
+_CRYSTAL_SALT = 37
+_CRYSTAL_STRIDE = 1013
+
+
+def _rings(subdiv: int, ceiling: int = _FRONT_SUBDIV_MAX) -> int:
     """Radial rings between the apex and the inset ring. Level 0 -> 1 ring."""
-    return 1 << max(0, min(_FRONT_SUBDIV_MAX, int(subdiv)))
+    return 1 << max(0, min(ceiling, int(subdiv)))
 
 
-def _tris_per_wedge(subdiv: int) -> int:
+def _cap_level(subdiv: int, crystal: float, density: int) -> int:
+    """Subdivision level the cap is actually built at.
+
+    Crystals are one-per-cap-triangle, so density is just more cap. Folding it
+    in here rather than splitting triangles afterwards is what keeps the whole
+    feature confined to the cap emission loop: the finer chain along the inset
+    edge flows into the bevel strip and the radial cut faces exactly as the
+    coarser one did, so the solid stays closed with no seam work at all.
+    """
+    if crystal <= 0.0:
+        return max(0, min(_FRONT_SUBDIV_MAX, int(subdiv)))
+    return max(0, min(_CRYSTAL_SUBDIV_MAX, int(subdiv) + max(0, int(density))))
+
+
+def _tris_per_wedge(subdiv: int, crystal: float = 0.0, density: int = 0) -> int:
     """Triangles one wedge contributes, at a given front subdivision.
 
     n**2 front patch + (n+1) front bevel + 2 wall + 2 back bevel + 1 back face
     + 2*(n+3) radial caps.  n=1 gives 16, the original hand-counted total.
+
+    With crystals the patch term triples -- every cap triangle becomes a
+    three-sided spike -- and n comes from _cap_level rather than front_subdiv
+    alone. The count stays identical across wedges either way, which
+    _wedge_bounds depends on: it slices the buffer into equal blocks.
     """
-    n = _rings(subdiv)
-    return n * n + 3 * n + 12
+    n = _rings(_cap_level(subdiv, crystal, density), _CRYSTAL_SUBDIV_MAX)
+    faces = n * n * (3 if crystal > 0.0 else 1)
+    return faces + 3 * n + 12
 
 # Vertical field of view, degrees. Shared by the projection and by the sky's
 # per-pixel ray reconstruction -- they must agree or the backdrop will not line
@@ -319,6 +370,40 @@ class ShardParams:
     # steep one are both things you might want to look at.
     front_subdiv: float = 3.0
     front_bulge: float = 0.65
+
+    # Crystal facets on the front cap. Like the curvature pair above these
+    # retessellate rather than set a uniform -- see _rebuild_geometry.
+    #
+    # front_subdiv/front_bulge exist to make the cap *smooth*; this is the
+    # opposite instrument. Every cap triangle is raised into a three-sided
+    # spike and flat-shaded, so the face becomes a field of hard-edged facets
+    # that each catch the light at their own angle as the shard turns. The two
+    # are not exclusive: subdivision is what sets how many crystals there are,
+    # and bulge still shapes the dome they stand on.
+    #
+    # crystal is the spike height as a multiple of the base facet's own size,
+    # not an absolute distance. Cap triangles near the apex ring are far
+    # smaller than the ones near the rim, and an absolute height would turn
+    # those into needles while barely dimpling these; scaling by facet size
+    # holds the *slope* roughly constant, which is what reads as crystal.
+    # 0.0 must stay a byte-identical no-op (the level-0 buffer is pinned by
+    # test).
+    crystal: float = 0.0
+    # Extra cap subdivision levels used only when crystal > 0: one crystal per
+    # cap triangle, so this is the density knob. Added on top of front_subdiv
+    # and clamped to _CRYSTAL_SUBDIV_MAX -- see _CRYSTAL_DENSITY_MAX for why
+    # the ceiling is where it is.
+    crystal_density: float = 1.0
+    # Spread of the per-spike height, 0 = every crystal the same height, 1 =
+    # anything from a pit to two and a half times the nominal height. Height
+    # spread is what the gleam actually keys off: identical spikes give
+    # identical facet angles, so the whole face lights and unlights at once.
+    crystal_vary: float = 0.5
+    # Radius of a flat, smooth-shaded ellipse left in the middle of the face,
+    # in planar units, with the numerals' own aspect. 0 puts crystals
+    # everywhere -- including straight through the readout, which is the point
+    # at which you find out whether you can still read it.
+    crystal_clear: float = 0.0
 
     # Camera. It sways back and forth across the front of the shard, always
     # looking at it -- rather than orbiting all the way round, which would
@@ -552,15 +637,14 @@ def _front_profile_z(u: float, inset_r: float, steepness: float, bulge: float):
     return flat + bulge * (curved - flat)
 
 
-def _front_patch(inset_a, inset_b, rim_a, rim_b, subdiv: int, bulge: float):
-    """Ring-subdivided front cap for one wedge.
+def _front_patch(inset_a, inset_b, rim_a, rim_b, n: int, bulge: float):
+    """Ring-subdivided front cap for one wedge, ``n`` rings deep.
 
     ``rings[j]`` holds j+1 points, ring 0 being the shared apex and ring n the
     chain along the inset edge. The two radial chains ``rings[j][0]`` and
     ``rings[j][j]`` are the wedge's cut boundaries; the radial cut faces must
     reuse them vertex-for-vertex or the solid opens up along every cut.
     """
-    n = _rings(subdiv)
     rings, normals = [], {}
     for j in range(n + 1):
         u = j / n
@@ -716,6 +800,139 @@ def _hash01(i: int, salt: int) -> float:
     return x - math.floor(x)
 
 
+def _crystal_weight(x: float, y: float, clear: float) -> float:
+    """How much crystal a point on the cap gets, 0 (flat) to 1 (full spike).
+
+    One weight per spike, taken at its base point, and it drives both the
+    height and the normal blend -- so a weight of 0 emits a spike of zero
+    height carrying the cap's own smooth normals, which is the original
+    surface exactly, just cut into three coplanar pieces. That matters more
+    than it sounds: the clear zone cannot *skip* spikes, because every wedge
+    has to end up with the same vertex count for _wedge_bounds to slice the
+    buffer into equal blocks. Tapering to nothing is the way to skip.
+    """
+    if clear <= 0.0:
+        return 1.0
+    r = math.hypot(x, y / _CRYSTAL_CLEAR_ASPECT)
+    lo = clear
+    hi = clear + _CRYSTAL_CLEAR_FEATHER
+    if r <= lo:
+        return 0.0
+    if r >= hi:
+        return 1.0
+    t = (r - lo) / (hi - lo)
+    return t * t * (3.0 - 2.0 * t)
+
+
+def _normalize(v) -> tuple:
+    length = math.sqrt(v[0] * v[0] + v[1] * v[1] + v[2] * v[2]) or 1.0
+    return (v[0] / length, v[1] / length, v[2] / length)
+
+
+def _mix_normal(smooth, flat, w: float) -> tuple:
+    """Normalised blend from a smooth vertex normal toward its facet normal."""
+    if w >= 1.0:
+        return flat
+    nx = smooth[0] + w * (flat[0] - smooth[0])
+    ny = smooth[1] + w * (flat[1] - smooth[1])
+    nz = smooth[2] + w * (flat[2] - smooth[2])
+    length = math.sqrt(nx * nx + ny * ny + nz * nz) or 1.0
+    return (nx / length, ny / length, nz / length)
+
+
+def _crystal_facets(points, normals, height, vary, clear, index):
+    """One cap triangle, raised into a three-sided crystal spike.
+
+    Yields ``(triangle, uvs, normals)`` for the three side facets. The spike's
+    tip is the only new point: the base triangle's three corners and its three
+    edges are left exactly where the smooth cap put them.
+
+    That restriction is the whole design. Displacing cap vertices is the
+    obvious way to write this and it is the way that breaks the solid -- the
+    inset chain is shared vertex-for-vertex with the front bevel and with both
+    radial cut faces, and the two chains along a wedge's cuts are shared with
+    the neighbouring wedge. Move those and you are chasing cracks and shading
+    seams along every cut line for the rest of the feature's life. Keep the
+    displacement strictly interior to a triangle and there is nothing to
+    chase: the shard is closed for the same reason it was closed before.
+
+    The tip is lifted along the base facet's *own* normal, not the smooth cap
+    normal, so the three side facets come off it symmetrically. Height is a
+    multiple of the facet's size (see ShardParams.crystal), and ``vary``
+    spreads it per spike -- far enough at 1.0 to go negative, which pits the
+    facet instead of spiking it. Pits are worth having: they tilt their facets
+    the other way, so the face keeps catching light through a half-turn where
+    a field of pure spikes would go dark all at once.
+    """
+    (ax, ay, az), (bx, by, bz), (cx, cy, cz) = points
+
+    # Facet normal, oriented outward, and the facet's own size. twice_area is
+    # the cross product's length, which is 2*area -- the normalisation divisor
+    # and the size measure fall out of the same square root.
+    ux, uy, uz = bx - ax, by - ay, bz - az
+    vx, vy, vz = cx - ax, cy - ay, cz - az
+    nx = uy * vz - uz * vy
+    ny = uz * vx - ux * vz
+    nz = ux * vy - uy * vx
+    if nz < 0.0:
+        nx, ny, nz = -nx, -ny, -nz
+    twice_area = math.sqrt(nx * nx + ny * ny + nz * nz) or 1.0
+    facet_n = (nx / twice_area, ny / twice_area, nz / twice_area)
+    size = math.sqrt(0.5 * twice_area)
+
+    # Barycentric tip position. Weights are perturbed about 1/3 and then
+    # renormalised, so they stay strictly positive and the tip stays strictly
+    # inside the triangle -- which is what guarantees the three side facets
+    # are non-degenerate and that the tip's planar position is inside the
+    # base's, so its UV cannot escape the face.
+    w0 = 1.0 + _CRYSTAL_JITTER * (_hash01(index, _CRYSTAL_SALT) - 0.5)
+    w1 = 1.0 + _CRYSTAL_JITTER * (_hash01(index, _CRYSTAL_SALT + 1) - 0.5)
+    w2 = 1.0 + _CRYSTAL_JITTER * (_hash01(index, _CRYSTAL_SALT + 2) - 0.5)
+    total = w0 + w1 + w2
+    w0, w1, w2 = w0 / total, w1 / total, w2 / total
+
+    base = (
+        w0 * ax + w1 * bx + w2 * cx,
+        w0 * ay + w1 * by + w2 * cy,
+        w0 * az + w1 * bz + w2 * cz,
+    )
+    weight = _crystal_weight(base[0], base[1], clear)
+
+    # 1.5 rather than 1.0 so that vary can reach past a flat facet into a pit
+    # before the slider tops out; at vary = 1 the amplitude spans [-0.5, 2.5].
+    amp = 1.0 + vary * 1.5 * (2.0 * _hash01(index, _CRYSTAL_SALT + 3) - 1.0)
+    lift = height * amp * size * weight
+
+    tip = (
+        base[0] + facet_n[0] * lift,
+        base[1] + facet_n[1] * lift,
+        base[2] + facet_n[2] * lift,
+    )
+    # UV from the *base* point, not the tip. The tip is displaced along the
+    # facet normal, which on a bulged cap has real x/y components; reading the
+    # numerals from the tip's own position would shear them outward, worst
+    # exactly where the cap is steepest.
+    tip_uv = _face_uv(base[0], base[1])
+    tip_n = _mix_normal(
+        _normalize((
+            w0 * normals[0][0] + w1 * normals[1][0] + w2 * normals[2][0],
+            w0 * normals[0][1] + w1 * normals[1][1] + w2 * normals[2][1],
+            w0 * normals[0][2] + w1 * normals[1][2] + w2 * normals[2][2],
+        )),
+        facet_n, weight,
+    )
+
+    uvs = [_face_uv(p[0], p[1]) for p in points]
+    blended = [_mix_normal(n, facet_n, weight) for n in normals]
+
+    for p, q in ((0, 1), (1, 2), (2, 0)):
+        yield (
+            [points[p], points[q], tip],
+            [uvs[p], uvs[q], tip_uv],
+            [blended[p], blended[q], tip_n],
+        )
+
+
 def _wedge_rigid_body(i: int, corners) -> tuple:
     """Pivot, linear velocity and angular velocity for one wedge.
 
@@ -788,7 +1005,9 @@ def _wedge_bounds(data: array.array) -> list:
     return bounds
 
 
-def _build_geometry(subdiv: int = 0, bulge: float = 0.0) -> array.array:
+def _build_geometry(subdiv: int = 0, bulge: float = 0.0, crystal: float = 0.0,
+                    crystal_density: int = 0, crystal_vary: float = 0.5,
+                    crystal_clear: float = 0.0) -> array.array:
     """Extrude the outline into a solid, one wedge per edge.
 
     Each wedge contributes a front face, a front bevel, a side wall, a back
@@ -803,6 +1022,13 @@ def _build_geometry(subdiv: int = 0, bulge: float = 0.0) -> array.array:
         pos(3) normal(3) uv(2) pieceCenter(3) pieceVel(3) pieceAxis(3) = 17
     """
     data = array.array("f")
+    # One cap tessellation for every wedge, so the per-wedge vertex count stays
+    # uniform -- see _tris_per_wedge. Crystals ride on a finer cap than the
+    # smoothing slider alone would ask for; everything downstream of the patch
+    # (bevel strip, radial cuts) reads the chains generically and does not care.
+    cap_rings = _rings(
+        _cap_level(subdiv, crystal, crystal_density), _CRYSTAL_SUBDIV_MAX
+    )
     apex_z = _front_profile_z(0.0, 0.0, 0.0, bulge)
     front_apex = (0.0, 0.0, apex_z)
     back_apex = (0.0, 0.0, -_THICKNESS - _BACK_PEAK_Z)
@@ -821,7 +1047,7 @@ def _build_geometry(subdiv: int = 0, bulge: float = 0.0) -> array.array:
             (bx * _BEVEL_INSET, by * _BEVEL_INSET, _BEVEL_Z),
             (ax, ay, 0.0),
             (bx, by, 0.0),
-            subdiv,
+            cap_rings,
             bulge,
         )
         _accumulate_patch_normals(slot_normals, accum)
@@ -867,15 +1093,23 @@ def _build_geometry(subdiv: int = 0, bulge: float = 0.0) -> array.array:
         # every subdivided vertex gets its text coordinate for free and the
         # numerals map identically however far the cap is curved -- the etching
         # needed no changes at all.
-        for tri in _patch_triangles(rings):
+        for tri_index, tri in enumerate(_patch_triangles(rings)):
             points = [rings[j][k] for j, k in tri]
-            _add_triangle_smooth(
-                data,
-                points,
-                [_face_uv(p[0], p[1]) for p in points],
-                [cap_normals[_normal_key(p)] for p in points],
-                piece,
-            )
+            normals = [cap_normals[_normal_key(p)] for p in points]
+            if crystal <= 0.0:
+                _add_triangle_smooth(
+                    data,
+                    points,
+                    [_face_uv(p[0], p[1]) for p in points],
+                    normals,
+                    piece,
+                )
+                continue
+            for facet, uvs, facet_normals in _crystal_facets(
+                points, normals, crystal, crystal_vary, crystal_clear,
+                i * _CRYSTAL_STRIDE + tri_index,
+            ):
+                _add_triangle_smooth(data, facet, uvs, facet_normals, piece)
 
         # Front bevel: the chamfer that catches the edge highlight. Its inset
         # edge is shared with the cap, so it has to follow the cap's
@@ -1249,12 +1483,19 @@ class ShardWidget(QOpenGLWidget):
         """
         subdiv = max(0, min(_FRONT_SUBDIV_MAX, int(round(self.params.front_subdiv))))
         bulge = max(0.0, min(1.0, float(self.params.front_bulge)))
-        key = (subdiv, bulge)
+        crystal = max(0.0, float(self.params.crystal))
+        density = max(0, min(_CRYSTAL_DENSITY_MAX,
+                             int(round(self.params.crystal_density))))
+        vary = max(0.0, min(1.0, float(self.params.crystal_vary)))
+        clear = max(0.0, float(self.params.crystal_clear))
+        key = (subdiv, bulge, crystal, density, vary, clear)
         if key == self._geometry_key:
             return False
 
         self._geometry_key = key
-        self._vertex_data = _build_geometry(subdiv, bulge)
+        self._vertex_data = _build_geometry(
+            subdiv, bulge, crystal, density, vary, clear
+        )
         self._vertex_count = len(self._vertex_data) // _FLOATS_PER_VERTEX
         self._geometry_dirty = True
         self._wedge_bounds = _wedge_bounds(self._vertex_data)

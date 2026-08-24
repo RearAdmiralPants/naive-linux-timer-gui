@@ -862,6 +862,216 @@ class CurvedFrontTest(unittest.TestCase):
 
 
 @needs_qt
+class CrystalFrontTest(unittest.TestCase):
+    """The crystal field on the front cap.
+
+    The properties worth pinning here are the ones that are invisible in a
+    screenshot and expensive to rediscover: that switching crystals off is a
+    true no-op, that a wedge is still a closed solid once its cap is a field
+    of spikes, and that every wedge still contributes the same number of
+    vertices -- ``_wedge_bounds`` slices the vertex buffer into equal blocks
+    to find each piece's pivot, so a wedge with its own count would silently
+    hand the shatter the wrong centres.
+
+    How it *looks* is not testable and is not tested. That is what
+    ``tools/render_still.py`` is for.
+    """
+
+    CASES = (
+        # subdiv, crystal, density, vary, clear
+        (0, 1.0, 0, 0.5, 0.0),
+        (2, 1.6, 1, 0.7, 0.0),
+        (2, 1.6, 1, 0.7, 0.45),
+        (1, 2.0, 2, 1.0, 0.0),
+        (3, 0.4, 0, 0.0, 0.0),
+    )
+
+    def test_crystal_zero_ignores_every_other_crystal_parameter(self):
+        """The off switch has to be off, not nearly off.
+
+        crystal is the only one of the four that gates the code path; the
+        other three feed the spike maths. If any of them leaked into the
+        buffer at crystal = 0, every tuned parameter set already on disk would
+        render differently the moment this feature landed -- the same contract
+        front_subdiv's level 0 has to keep.
+        """
+        from naive_timer.shard import _build_geometry
+
+        self.assertEqual(_build_geometry(), _build_geometry(0, 0.0, 0.0))
+        self.assertEqual(
+            _build_geometry(3, 0.65),
+            _build_geometry(3, 0.65, 0.0, 2, 1.0, 0.5),
+        )
+
+    def test_geometry_is_deterministic(self):
+        """Spike heights and tip positions come from hashes, not random."""
+        from naive_timer.shard import _build_geometry
+
+        for subdiv, crystal, density, vary, clear in self.CASES:
+            args = (subdiv, 0.65, crystal, density, vary, clear)
+            self.assertEqual(_build_geometry(*args), _build_geometry(*args))
+
+    def test_every_wedge_stays_a_closed_solid(self):
+        """Spikes must not open the cap.
+
+        This is the whole reason the tip is the only point that moves. The
+        cap's inset chain is shared vertex-for-vertex with the front bevel,
+        and its two radial chains with the cut faces and with the neighbouring
+        wedge; displacing any of them cracks the solid along every cut. Raising
+        a point strictly inside a triangle leaves all three of its edges where
+        they were, so the wedge closes for exactly the reason it did before.
+        """
+        from collections import Counter
+
+        from naive_timer.shard import (
+            _FLOATS_PER_VERTEX as stride, _OUTLINE, _build_geometry,
+        )
+
+        for subdiv, crystal, density, vary, clear in self.CASES:
+            data = _build_geometry(subdiv, 0.65, crystal, density, vary, clear)
+            verts = len(data) // stride
+            per = verts // len(_OUTLINE)
+            for wedge in range(len(_OUTLINE)):
+                edges = Counter()
+                start = wedge * per
+                for t in range(per // 3):
+                    pts = [
+                        tuple(round(c, 5) for c in
+                              data[(start + t * 3 + k) * stride:
+                                   (start + t * 3 + k) * stride + 3])
+                        for k in range(3)
+                    ]
+                    for a, b in ((0, 1), (1, 2), (2, 0)):
+                        edges[frozenset((pts[a], pts[b]))] += 1
+                self.assertEqual(
+                    [e for e, n in edges.items() if n != 2], [],
+                    f"wedge {wedge} open at crystal={crystal} subdiv={subdiv}",
+                )
+
+    def test_wedges_contribute_equal_vertex_counts(self):
+        """_wedge_bounds divides the buffer by wedge count and trusts it."""
+        from naive_timer.shard import (
+            _FLOATS_PER_VERTEX as stride, _OUTLINE, _build_geometry,
+            _tris_per_wedge,
+        )
+
+        for subdiv, crystal, density, vary, clear in self.CASES:
+            data = _build_geometry(subdiv, 0.65, crystal, density, vary, clear)
+            verts = len(data) // stride
+            self.assertEqual(
+                verts, 3 * _tris_per_wedge(subdiv, crystal, density) * len(_OUTLINE)
+            )
+            per = verts // len(_OUTLINE)
+            for wedge in range(len(_OUTLINE)):
+                base = wedge * per * stride
+                centre = tuple(data[base + 8:base + 11])
+                for v in range(per):
+                    off = base + v * stride
+                    self.assertEqual(tuple(data[off + 8:off + 11]), centre)
+
+    def test_normals_are_unit_and_face_the_camera(self):
+        """Flat facets, but the winding contract is unchanged.
+
+        The two-pass transparency in paintGL culls by orientation to draw back
+        surfaces before front ones, and the cap is the surface where "outward"
+        is unambiguously +z. A spike tips its facets hard -- at crystal 2.0
+        some of them are nearly vertical -- but never past the horizon, or the
+        cap would start sorting itself into the wrong pass.
+        """
+        import math
+
+        from naive_timer.shard import (
+            _FLOATS_PER_VERTEX as stride, _OUTLINE, _build_geometry,
+            _tris_per_wedge,
+        )
+
+        for subdiv, crystal, density, vary, clear in self.CASES:
+            data = _build_geometry(subdiv, 0.65, crystal, density, vary, clear)
+            per = _tris_per_wedge(subdiv, crystal, density)
+            cap_tris = 3 * (1 << min(5, subdiv + density)) ** 2
+            for wedge in range(len(_OUTLINE)):
+                for t in range(cap_tris):
+                    for k in range(3):
+                        off = ((wedge * per + t) * 3 + k) * stride
+                        nx, ny, nz = data[off + 3:off + 6]
+                        self.assertAlmostEqual(
+                            math.sqrt(nx * nx + ny * ny + nz * nz), 1.0, places=5
+                        )
+                        self.assertGreater(
+                            nz, 0.0,
+                            f"cap normal turned away from +z at crystal={crystal}",
+                        )
+
+    def test_clear_zone_flattens_the_spike_completely(self):
+        """The middle of the face must come back exactly flat, not nearly.
+
+        A pit under a glyph is worse than a crystal on it: the etch reads the
+        text through the surface normal, so a tilted facet drags the numeral
+        sideways. Inside the clear radius the weight is 0, and a weight of 0
+        has to mean zero lift *and* the cap's own smooth normals back --
+        the original surface, merely cut into three coplanar pieces.
+
+        Tapering rather than skipping is not a stylistic choice: skipping
+        would give the wedges unequal vertex counts, which _wedge_bounds
+        cannot survive.
+        """
+        from naive_timer.shard import _crystal_facets, _crystal_weight
+
+        self.assertEqual(_crystal_weight(0.0, 0.0, 0.45), 0.0)
+        self.assertEqual(_crystal_weight(0.9, 0.0, 0.45), 1.0)
+        self.assertEqual(_crystal_weight(0.0, 0.0, 0.0), 1.0)  # no clear zone
+
+        points = [(0.0, 0.0, 0.1), (0.1, 0.0, 0.1), (0.0, 0.1, 0.1)]
+        normals = [(0.0, 0.0, 1.0)] * 3
+        facets = list(_crystal_facets(points, normals, 1.6, 0.7, 0.9, 17))
+        self.assertEqual(len(facets), 3)
+        for tri, _uvs, tri_normals in facets:
+            for vertex in tri:
+                self.assertAlmostEqual(vertex[2], 0.1, places=9)
+            for normal in tri_normals:
+                self.assertEqual(normal, (0.0, 0.0, 1.0))
+
+    def test_the_base_surface_never_moves(self):
+        """Only the tip is new; every cap vertex the smooth build had survives.
+
+        Stated as a set containment rather than a per-vertex comparison
+        because the crystal build has three times the cap triangles and
+        _add_triangle_smooth may rewind any of them. What matters is that no
+        point of the original surface was displaced -- that is what keeps the
+        wedge closed against the bevel, the cut faces and its neighbours.
+        """
+        from naive_timer.shard import (
+            _FLOATS_PER_VERTEX as stride, _OUTLINE, _build_geometry,
+            _tris_per_wedge,
+        )
+
+        def cap_vertices(data, subdiv, crystal, density):
+            per = _tris_per_wedge(subdiv, crystal, density)
+            cap = (1 << (subdiv + density if crystal > 0.0 else subdiv)) ** 2
+            cap *= 3 if crystal > 0.0 else 1
+            found = set()
+            for wedge in range(len(_OUTLINE)):
+                for t in range(cap):
+                    for k in range(3):
+                        off = ((wedge * per + t) * 3 + k) * stride
+                        found.add(tuple(round(c, 5) for c in data[off:off + 3]))
+            return found
+
+        for subdiv, density in ((2, 0), (2, 1), (1, 2), (0, 0)):
+            smooth = cap_vertices(
+                _build_geometry(subdiv + density, 0.65), subdiv + density, 0.0, 0
+            )
+            crystal = cap_vertices(
+                _build_geometry(subdiv, 0.65, 1.6, density, 0.7, 0.0),
+                subdiv, 1.6, density,
+            )
+            self.assertTrue(
+                smooth <= crystal,
+                f"{len(smooth - crystal)} cap vertices moved at "
+                f"subdiv={subdiv} density={density}",
+            )
+
+
 class GlTest(unittest.TestCase):
     """Needs a real GL context. Run under xvfb-run when there's no display."""
 

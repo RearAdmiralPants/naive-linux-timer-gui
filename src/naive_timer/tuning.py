@@ -118,6 +118,20 @@ _GEOMETRY_SLIDERS = [
     ("front_bulge", 0.0, 1.0),
 ]
 
+# Retessellates too, and the rebuild is the expensive one: at the top of both
+# density and subdiv the cap is 18k flat facets built a float at a time in
+# Python. crystal at 0 is the off switch and costs nothing.
+#
+# crystal is height as a multiple of facet size, so it reads as slope: 1.0 is
+# a spike as tall as its base is wide, which is already steep. crystal_density
+# adds cap subdivision levels on top of front_subdiv, one crystal per triangle.
+_CRYSTAL_SLIDERS = [
+    ("crystal", 0.0, 2.0),
+    ("crystal_density", 0.0, 2.0, 1),
+    ("crystal_vary", 0.0, 1.0),
+    ("crystal_clear", 0.0, 0.8),
+]
+
 _SHATTER_SLIDERS = [
     ("gravity", 0.0, 2.0),          # g: 0 drifts flat, 1 the tuned fall, 2 heavy
     ("shatter_clear_s", 1.0, 20.0), # seconds the pieces are drawn before clearing
@@ -251,6 +265,7 @@ class TuningPanel(QWidget):
 
         left.addWidget(self._slider_group("Glass", _SLIDERS))
         left.addWidget(self._slider_group("Front face", _GEOMETRY_SLIDERS))
+        left.addWidget(self._slider_group("Crystal", _CRYSTAL_SLIDERS))
         right.addWidget(self._slider_group("Camera", _CAMERA_SLIDERS))
         right.addWidget(self._slider_group("Sky", _SKY_SLIDERS))
         right.addWidget(self._slider_group("Shatter", _SHATTER_SLIDERS))
@@ -487,7 +502,7 @@ class TuningPanel(QWidget):
         p: ShardParams = self._params
         print("\n# --- paste into ShardParams defaults ---")
         for name, _lo, _hi, *_ in (
-            _SLIDERS + _GEOMETRY_SLIDERS + _POST_SLIDERS
+            _SLIDERS + _GEOMETRY_SLIDERS + _CRYSTAL_SLIDERS + _POST_SLIDERS
             + _CAMERA_SLIDERS + _SKY_SLIDERS + _SHATTER_SLIDERS
         ):
             print(f"    {name}: float = {getattr(p, name):.2f}")
