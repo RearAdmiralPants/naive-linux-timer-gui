@@ -126,8 +126,10 @@ _GEOMETRY_SLIDERS = [
 # a spike as tall as its base is wide, which is already steep. crystal_density
 # adds cap subdivision levels on top of front_subdiv, one crystal per triangle.
 _CRYSTAL_SLIDERS = [
-    ("crystal", 0.0, 2.0),
+    ("crystal", 0.0, 0.08),
+    ("crystal_scale", 0.5, 8.0),
     ("crystal_density", 0.0, 2.0, 1),
+    ("crystal_spike", 0.0, 1.5),
     ("crystal_vary", 0.0, 1.0),
     ("crystal_clear", 0.0, 0.8),
 ]

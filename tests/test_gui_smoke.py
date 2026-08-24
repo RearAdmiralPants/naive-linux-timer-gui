@@ -877,14 +877,23 @@ class CrystalFrontTest(unittest.TestCase):
     ``tools/render_still.py`` is for.
     """
 
+    # subdiv, crystal, density, vary, clear, scale, spike
     CASES = (
-        # subdiv, crystal, density, vary, clear
-        (0, 1.0, 0, 0.5, 0.0),
-        (2, 1.6, 1, 0.7, 0.0),
-        (2, 1.6, 1, 0.7, 0.45),
-        (1, 2.0, 2, 1.0, 0.0),
-        (3, 0.4, 0, 0.0, 0.0),
+        (0, 0.04, 0, 0.5, 0.00, 3.0, 0.0),   # plates only
+        (2, 0.04, 1, 0.7, 0.00, 3.0, 0.0),
+        (2, 0.05, 1, 0.7, 0.45, 4.5, 0.0),   # plates, numerals spared
+        (2, 0.00, 1, 0.7, 0.00, 3.0, 1.0),   # spikes only
+        (1, 0.06, 2, 1.0, 0.00, 6.0, 0.8),   # both
+        (3, 0.02, 0, 0.0, 0.00, 1.0, 0.0),
     )
+
+    def _build(self, case):
+        from naive_timer.shard import _build_geometry
+
+        subdiv, crystal, density, vary, clear, scale, spike = case
+        return _build_geometry(
+            subdiv, 0.65, crystal, density, vary, clear, scale, spike
+        )
 
     def test_crystal_zero_ignores_every_other_crystal_parameter(self):
         """The off switch has to be off, not nearly off.
@@ -907,9 +916,8 @@ class CrystalFrontTest(unittest.TestCase):
         """Spike heights and tip positions come from hashes, not random."""
         from naive_timer.shard import _build_geometry
 
-        for subdiv, crystal, density, vary, clear in self.CASES:
-            args = (subdiv, 0.65, crystal, density, vary, clear)
-            self.assertEqual(_build_geometry(*args), _build_geometry(*args))
+        for case in self.CASES:
+            self.assertEqual(self._build(case), self._build(case))
 
     def test_every_wedge_stays_a_closed_solid(self):
         """Spikes must not open the cap.
@@ -927,8 +935,9 @@ class CrystalFrontTest(unittest.TestCase):
             _FLOATS_PER_VERTEX as stride, _OUTLINE, _build_geometry,
         )
 
-        for subdiv, crystal, density, vary, clear in self.CASES:
-            data = _build_geometry(subdiv, 0.65, crystal, density, vary, clear)
+        for case in self.CASES:
+            subdiv, crystal, density = case[0], case[1], case[2]
+            data = self._build(case)
             verts = len(data) // stride
             per = verts // len(_OUTLINE)
             for wedge in range(len(_OUTLINE)):
@@ -955,11 +964,13 @@ class CrystalFrontTest(unittest.TestCase):
             _tris_per_wedge,
         )
 
-        for subdiv, crystal, density, vary, clear in self.CASES:
-            data = _build_geometry(subdiv, 0.65, crystal, density, vary, clear)
+        for case in self.CASES:
+            subdiv, crystal, density, spike = case[0], case[1], case[2], case[6]
+            data = self._build(case)
             verts = len(data) // stride
             self.assertEqual(
-                verts, 3 * _tris_per_wedge(subdiv, crystal, density) * len(_OUTLINE)
+                verts,
+                3 * _tris_per_wedge(subdiv, crystal, density, spike) * len(_OUTLINE),
             )
             per = verts // len(_OUTLINE)
             for wedge in range(len(_OUTLINE)):
@@ -985,9 +996,10 @@ class CrystalFrontTest(unittest.TestCase):
             _tris_per_wedge,
         )
 
-        for subdiv, crystal, density, vary, clear in self.CASES:
-            data = _build_geometry(subdiv, 0.65, crystal, density, vary, clear)
-            per = _tris_per_wedge(subdiv, crystal, density)
+        for case in self.CASES:
+            subdiv, crystal, density, spike = case[0], case[1], case[2], case[6]
+            data = self._build(case)
+            per = _tris_per_wedge(subdiv, crystal, density, spike)
             cap_tris = 3 * (1 << min(5, subdiv + density)) ** 2
             for wedge in range(len(_OUTLINE)):
                 for t in range(cap_tris):
@@ -1031,24 +1043,87 @@ class CrystalFrontTest(unittest.TestCase):
             for normal in tri_normals:
                 self.assertEqual(normal, (0.0, 0.0, 1.0))
 
-    def test_the_base_surface_never_moves(self):
-        """Only the tip is new; every cap vertex the smooth build had survives.
+    def test_the_inset_ring_is_never_displaced(self):
+        """The fracture field must die before it reaches the bevel.
 
-        Stated as a set containment rather than a per-vertex comparison
-        because the crystal build has three times the cap triangles and
-        _add_triangle_smooth may rewind any of them. What matters is that no
-        point of the original surface was displaced -- that is what keeps the
-        wedge closed against the bevel, the cut faces and its neighbours.
+        The cap's outer ring is shared with the front bevel, which is drawn as
+        one chamfer carrying a single averaged normal, and with the rim that
+        draws the silhouette. Let the plates reach it and the chamfer's normal
+        becomes the mean of facets pointing in every direction while the
+        outline goes visibly ragged. _rim_fade is what prevents that, and it
+        has to reach exactly zero, not nearly zero.
+        """
+        from naive_timer.shard import _BEVEL_INSET, _front_patch, _rim_fade
+
+        self.assertEqual(_rim_fade(1.0), 0.0)
+        self.assertEqual(_rim_fade(0.5), 1.0)
+
+        corners = ((-0.95, 0.26), (-0.52, 0.88))
+        args = (
+            (corners[0][0] * _BEVEL_INSET, corners[0][1] * _BEVEL_INSET, 0.05),
+            (corners[1][0] * _BEVEL_INSET, corners[1][1] * _BEVEL_INSET, 0.05),
+            (corners[0][0], corners[0][1], 0.0),
+            (corners[1][0], corners[1][1], 0.0),
+            8, 0.65,
+        )
+        smooth, _ = _front_patch(*args)
+        plated, _ = _front_patch(*args, 0.06, 3.0, 0.0)
+        self.assertEqual(smooth[-1], plated[-1])
+        self.assertNotEqual(smooth[4], plated[4])  # the interior did move
+
+    def test_neighbouring_wedges_agree_on_their_shared_chain(self):
+        """The seam test. A wedge's two radial chains belong to two wedges.
+
+        The plate field is a pure function of planar position for exactly this
+        reason: wedge i reaches its shared edge at t = 1 and wedge i+1 reaches
+        the same edge at t = 0, by different arithmetic. If the height depended
+        on anything but where the point is -- a per-wedge index, an
+        accumulator, a parameter-space coordinate -- the two would disagree and
+        the shard would open along every cut line.
+        """
+        from naive_timer.shard import _BEVEL_INSET, _OUTLINE, _front_patch
+
+        def patch(i):
+            ax, ay = _OUTLINE[i]
+            bx, by = _OUTLINE[(i + 1) % len(_OUTLINE)]
+            rings, _ = _front_patch(
+                (ax * _BEVEL_INSET, ay * _BEVEL_INSET, 0.05),
+                (bx * _BEVEL_INSET, by * _BEVEL_INSET, 0.05),
+                (ax, ay, 0.0), (bx, by, 0.0), 8, 0.65,
+                0.06, 3.0, 0.0,
+            )
+            return rings
+
+        for i in range(len(_OUTLINE)):
+            here = patch(i)
+            nxt = patch((i + 1) % len(_OUTLINE))
+            for j in range(len(here)):
+                mine = here[j][j]        # my chain along the b edge
+                theirs = nxt[j][0]       # their chain along the a edge
+                for axis in range(3):
+                    self.assertAlmostEqual(
+                        mine[axis], theirs[axis], places=9,
+                        msg=f"wedges {i}/{i + 1} disagree at ring {j}",
+                    )
+
+    def test_spikes_alone_leave_the_base_surface_alone(self):
+        """With plates off, the tip is still the only new point.
+
+        Worth keeping separate from the plate cases: spikes displace nothing
+        that anything else references, so this mode has no seam exposure at
+        all, and if that ever changes it should fail here rather than in a
+        screenshot.
         """
         from naive_timer.shard import (
             _FLOATS_PER_VERTEX as stride, _OUTLINE, _build_geometry,
             _tris_per_wedge,
         )
 
-        def cap_vertices(data, subdiv, crystal, density):
-            per = _tris_per_wedge(subdiv, crystal, density)
-            cap = (1 << (subdiv + density if crystal > 0.0 else subdiv)) ** 2
-            cap *= 3 if crystal > 0.0 else 1
+        def cap_vertices(data, subdiv, crystal, density, spike):
+            per = _tris_per_wedge(subdiv, crystal, density, spike)
+            cap = (1 << (subdiv + density)) ** 2 if (crystal or spike) else \
+                (1 << subdiv) ** 2
+            cap *= 3 if (crystal or spike) else 1
             found = set()
             for wedge in range(len(_OUTLINE)):
                 for t in range(cap):
@@ -1057,17 +1132,18 @@ class CrystalFrontTest(unittest.TestCase):
                         found.add(tuple(round(c, 5) for c in data[off:off + 3]))
             return found
 
-        for subdiv, density in ((2, 0), (2, 1), (1, 2), (0, 0)):
+        for subdiv, density in ((2, 0), (2, 1), (1, 2)):
             smooth = cap_vertices(
-                _build_geometry(subdiv + density, 0.65), subdiv + density, 0.0, 0
+                _build_geometry(subdiv + density, 0.65),
+                subdiv + density, 0.0, 0, 0.0,
             )
-            crystal = cap_vertices(
-                _build_geometry(subdiv, 0.65, 1.6, density, 0.7, 0.0),
-                subdiv, 1.6, density,
+            spiked = cap_vertices(
+                _build_geometry(subdiv, 0.65, 0.0, density, 0.7, 0.0, 3.0, 1.0),
+                subdiv, 0.0, density, 1.0,
             )
             self.assertTrue(
-                smooth <= crystal,
-                f"{len(smooth - crystal)} cap vertices moved at "
+                smooth <= spiked,
+                f"{len(smooth - spiked)} cap vertices moved at "
                 f"subdiv={subdiv} density={density}",
             )
 

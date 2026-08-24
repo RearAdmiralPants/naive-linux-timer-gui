@@ -47,6 +47,31 @@ void main() {
 
     vec3 N = normalize(vNormal);
 
+    // Two-sided. The shard is translucent and drawn in two passes, so seeing
+    // the *inside* of a surface is normal here -- you are looking at it
+    // through the glass from the other side. Its geometric normal points away
+    // from both the light and the eye, so lit one-sidedly it collects nothing
+    // but the ambient floor: a black facet with the sky showing through it,
+    // which reads as a hole punched in a solid object.
+    //
+    // This was invisible while the front cap was smooth and convex, because
+    // the only back-facing cap fragments were a sliver at the silhouette. Put
+    // relief on the cap and that sliver becomes a whole second surface --
+    // every far wall of every fracture -- and the holes are everywhere.
+    //
+    // Only the *lighting* normal flips. Fresnel keeps the geometric one: a
+    // back-facing fragment has dot(N, V) < 0, which the max() clamps to 0, so
+    // it has always taken the full uFresnel -- and that maxed-out term is
+    // most of what makes the far side of the shard read as solid rather than
+    // as a tinted window. Flipping N for Fresnel too swaps it for a proper
+    // face-on Fresnel, which is near zero, and the whole back of the object
+    // turns to glass you can count stars through. Every tuned preset on disk
+    // is balanced against the old behaviour, so it stays.
+    vec3 Ng = N;
+    if (!gl_FrontFacing) {
+        N = -N;
+    }
+
     // Etched numerals: bump the surface normal by the gradient of the glyph
     // coverage, so the engraving catches the light at its edges rather than
     // being painted on flat.
@@ -80,7 +105,7 @@ void main() {
 
     float diff = max(dot(N, L), 0.0);
     float spec = pow(max(dot(N, H), 0.0), uSpecPower) * uSpecStrength;
-    float fres = pow(1.0 - max(dot(N, V), 0.0), 3.0) * uFresnel;
+    float fres = pow(1.0 - max(dot(Ng, V), 0.0), 3.0) * uFresnel;
 
     // The light tints what the light drives -- diffuse, specular, Fresnel --
     // but not the ambient floor, and not the emissive numerals below, which

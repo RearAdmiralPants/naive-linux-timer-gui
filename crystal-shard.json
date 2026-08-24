@@ -4,7 +4,7 @@
   "light_z": 3.29,
   "light_intensity": 1.0,
   "spec_power": 40.0,
-  "spec_strength": 2.0,
+  "spec_strength": 1.5,
   "fresnel": 0.9,
   "glow": 1.69,
   "etch": 0.63,
@@ -59,8 +59,10 @@
   ],
   "star_density": 178.29,
   "star_brightness": 1.76,
-  "crystal": 1.6,
-  "crystal_density": 1.0,
-  "crystal_vary": 0.7,
-  "crystal_clear": 0.45
+  "crystal": 0.045,
+  "crystal_scale": 4.0,
+  "crystal_density": 2.0,
+  "crystal_spike": 0.0,
+  "crystal_vary": 0.5,
+  "crystal_clear": 0.0
 }
