@@ -59,10 +59,12 @@
   ],
   "star_density": 178.29,
   "star_brightness": 1.76,
-  "crystal": 0.045,
-  "crystal_scale": 4.0,
+  "crystal": 0.055,
+  "crystal_scale": 5.0,
   "crystal_density": 2.0,
   "crystal_spike": 0.0,
   "crystal_vary": 0.5,
-  "crystal_clear": 0.0
+  "crystal_clear": 0.0,
+  "crystal_jitter": 1.0,
+  "crystal_panel": 0.85
 }

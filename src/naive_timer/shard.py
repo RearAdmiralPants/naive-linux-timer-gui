@@ -238,7 +238,7 @@ _CRYSTAL_DENSITY_MAX = 2
 # perfectly centred spikes on a regular ring grid reads as a machined pattern
 # rather than as crystal. Held at a constant instead of exposed: it is a
 # texture, not a look, and it has no useful setting other than "some".
-_CRYSTAL_JITTER = 1.2
+_CRYSTAL_TIP_JITTER = 1.2
 
 # Where the fracture field fades out along the radius, as a fraction of the
 # way from apex to inset ring. The cap's outer edge is shared with the front
@@ -248,6 +248,27 @@ _CRYSTAL_JITTER = 1.2
 # Fading the last sixth costs a band of smooth glass just inside the bevel and
 # buys a clean outline.
 _CRYSTAL_RIM_FADE = 0.84
+
+# Domain warp applied to the plate lookup, in cells. Without it a jittered
+# grid still reads as a grid: the cells come out much the same size and much
+# the same roundness, and six of them in a row is a pattern the eye finds
+# instantly. Bending the lookup position first stretches some cells into
+# slivers and lets others swell, which is what real fracture looks like. Past
+# about 0.6 the warp folds the field back on itself and cells start to
+# reappear in two places at once.
+_CRYSTAL_WARP = 0.45
+
+# Mesh jitter frequencies, in cycles per scene unit. Two octaves rather than
+# one: the low one stretches whole regions of the tessellation, the high one
+# decorrelates neighbouring vertices. One octave of either alone reads as
+# uniform noise on a regular grid, which is still a regular grid.
+_CRYSTAL_JITTER_LOW = 3.0
+_CRYSTAL_JITTER_HIGH = 11.0
+
+# Mesh jitter amplitude at crystal_jitter = 1, as a fraction of the local
+# vertex spacing. Below 0.5 a vertex cannot cross its neighbour, so no triangle
+# can invert; the margin below that is for the two octaves landing in phase.
+_CRYSTAL_JITTER_MAX = 0.42
 
 # Plate tilt, as a height change across one cell. Zero gives flat slabs at
 # random heights, which reads as a staircase; this puts each plate on its own
@@ -410,6 +431,17 @@ class ShardParams:
     # under strain and starts reading as scrap metal. 0.0 must stay a
     # byte-identical no-op (the level-0 buffer is pinned by test).
     crystal: float = 0.0
+    # How much of a plate shades as one panel, 0 = every mesh triangle is its
+    # own facet, 1 = the Voronoi cell is. Fracture walls keep their own normal
+    # either way. This is the knob for facet *size* variance, where
+    # crystal_jitter is the one for facet shape.
+    crystal_panel: float = 0.0
+    # Irregularity of the tessellation itself, 0 = the plain ring-and-slot
+    # grid, 1 = as far as a vertex can move without overtaking a neighbour.
+    # The plate field randomises the facets' *heights*; this randomises their
+    # shapes. Without it the creases still run in concentric rings and the
+    # crust reads as quilted however chaotic the heights are.
+    crystal_jitter: float = 0.0
     # Plates per scene unit. Low gives a few broad slabs, high a gravel of
     # small ones. This is the knob that decides how big a fragment reads as;
     # crystal_density only decides how finely each one is triangulated.
@@ -667,7 +699,8 @@ def _front_profile_z(u: float, inset_r: float, steepness: float, bulge: float):
 
 
 def _front_patch(inset_a, inset_b, rim_a, rim_b, n: int, bulge: float,
-                 crystal: float = 0.0, scale: float = 3.0, clear: float = 0.0):
+                 crystal: float = 0.0, scale: float = 3.0, clear: float = 0.0,
+                 jitter: float = 0.0):
     """Ring-subdivided front cap for one wedge, ``n`` rings deep.
 
     With ``crystal`` > 0 each point is pushed along z by the plate field. Along
@@ -677,6 +710,26 @@ def _front_patch(inset_a, inset_b, rim_a, rim_b, n: int, bulge: float,
     where the cap is steepest -- while a pure-z one cannot move a UV at all.
     On a cap whose whole rise is 0.09 units the two are near enough
     indistinguishable anyway.
+
+    With ``jitter`` > 0 the sample parameters are perturbed as well, which
+    randomises the shape of every triangle. It is done in (u, t) rather than in
+    x/y on purpose, because the two boundaries that matter are parameter lines:
+    a radial jitter slides a point along its own ray, so the chains at t = 0
+    and t = 1 stay exactly in the cut planes the radial faces are built from,
+    and a tangential jitter slides a point along its own ring, so the chain at
+    u = 1 stays exactly on the straight inset edge the bevel needs. Each
+    perturbation is faded out at the two ends of its own parameter, so no
+    corner of the patch moves at all.
+
+    The perturbation is a function of *position*, never of (u, t) or of the
+    ring and slot indices. Wedge i meets its neighbour at t = 1 while the
+    neighbour meets it at t = 0; anything keyed on the parameter would give the
+    two different answers and tear the seam open.
+
+    The numerals do not care. _face_uv is a planar *projection*: a vertex that
+    moves sideways simply picks up the coordinate of whatever is at its new
+    position, so the text stays exactly where it was in space and only the
+    triangulation under it changes.
 
     The analytic normals returned alongside are the *undisplaced* surface's.
     They are correct wherever the field is faded out -- the rim band and the
@@ -694,8 +747,26 @@ def _front_patch(inset_a, inset_b, rim_a, rim_b, n: int, bulge: float,
         row = []
         for k in range(j + 1):
             t = k / j if j else 0.0
+            su, st = u, t
+            if jitter > 0.0 and 0 < j:
+                # Sample the noise at where this vertex *would* have been, so
+                # that two wedges asking about their shared edge ask about the
+                # same place. Only the planar part of that point is needed
+                # and it is two multiplies, so take it directly rather than
+                # running _cap_point_and_normal's cubic profile and central
+                # difference for a z and a normal that get thrown away.
+                bx = inset_a[0] + t * (inset_b[0] - inset_a[0])
+                by = inset_a[1] + t * (inset_b[1] - inset_a[1])
+                px, py = bx * u, by * u
+                amp = jitter * _CRYSTAL_JITTER_MAX
+                su = u + amp * _ends_fade(u) / n * _signed_noise2(
+                    px, py, _CRYSTAL_SALT + 13
+                )
+                st = t + amp * _ends_fade(t) / j * _signed_noise2(
+                    px, py, _CRYSTAL_SALT + 15
+                )
             point, normal = _cap_point_and_normal(
-                u, t, inset_a, inset_b, rim_a, rim_b, bulge
+                su, st, inset_a, inset_b, rim_a, rim_b, bulge
             )
             if crystal > 0.0:
                 lift = (
@@ -864,8 +935,77 @@ def _hash2i(gx: int, gy: int, salt: int) -> float:
     return _hash01(((gx * 374761393) ^ (gy * 668265263)) % 1048576, salt)
 
 
+def _value_noise2(x: float, y: float, salt: int) -> float:
+    """Smooth lattice noise in [0, 1). Continuous, which is the whole point.
+
+    Everything that perturbs a shared vertex has to be continuous in position,
+    not merely deterministic. Two wedges reach their common cut edge by
+    different arithmetic and land up to an ulp apart; a hash of that position
+    would return two unrelated numbers and tear the seam open, while a
+    continuous field returns two numbers an ulp apart.
+    """
+    ix = math.floor(x)
+    iy = math.floor(y)
+    fx = x - ix
+    fy = y - iy
+    sx = fx * fx * (3.0 - 2.0 * fx)
+    sy = fy * fy * (3.0 - 2.0 * fy)
+
+    n00 = _hash2i(ix, iy, salt)
+    n10 = _hash2i(ix + 1, iy, salt)
+    n01 = _hash2i(ix, iy + 1, salt)
+    n11 = _hash2i(ix + 1, iy + 1, salt)
+    return (
+        (n00 * (1.0 - sx) + n10 * sx) * (1.0 - sy)
+        + (n01 * (1.0 - sx) + n11 * sx) * sy
+    )
+
+
+def _signed_noise2(x: float, y: float, salt: int) -> float:
+    """Two octaves of _value_noise2, remapped to [-1, 1)."""
+    return 2.0 * (
+        0.65 * _value_noise2(x * _CRYSTAL_JITTER_LOW, y * _CRYSTAL_JITTER_LOW, salt)
+        + 0.35 * _value_noise2(
+            x * _CRYSTAL_JITTER_HIGH, y * _CRYSTAL_JITTER_HIGH, salt + 1
+        )
+    ) - 1.0
+
+
+# Per-cell constants for the plate field, memoised. Every vertex looks at the
+# nine cells around it and each cell costs five sine hashes, so neighbouring
+# vertices were re-deriving the same forty-five numbers over and over. The
+# entries are a pure function of the cell index, so this changes no output --
+# and the field only ever spans the cap, which at the top of crystal_scale is a
+# few hundred cells, so it does not grow.
+_PLATE_CELLS: dict = {}
+
+
+def _plate_cell(gx: int, gy: int) -> tuple:
+    """Site position, base height and slope for one cell of the plate field."""
+    cell = _PLATE_CELLS.get((gx, gy))
+    if cell is None:
+        cell = (
+            gx + _hash2i(gx, gy, _CRYSTAL_SALT + 4),
+            gy + _hash2i(gx, gy, _CRYSTAL_SALT + 5),
+            2.0 * _hash2i(gx, gy, _CRYSTAL_SALT + 6) - 1.0,
+            _CRYSTAL_TILT * (2.0 * _hash2i(gx, gy, _CRYSTAL_SALT + 7) - 1.0),
+            _CRYSTAL_TILT * (2.0 * _hash2i(gx, gy, _CRYSTAL_SALT + 8) - 1.0),
+        )
+        _PLATE_CELLS[(gx, gy)] = cell
+    return cell
+
+
 def _plate_height(x: float, y: float, scale: float) -> float:
-    """Fractured-plate height field at a planar point, roughly in [-1, 1].
+    """Just the height. See _plate_sample."""
+    return _plate_sample(x, y, scale)[0]
+
+
+def _plate_sample(x: float, y: float, scale: float) -> tuple:
+    """Fractured-plate field: ``(height, tilt_x, tilt_y)`` at a planar point.
+
+    Height is roughly in [-1, 1]; the tilts are the winning cell's own slope,
+    per unit of cell space, and are what let a caller shade a whole plate as
+    one panel instead of shading each triangle it happens to be cut into.
 
     A jittered-grid Voronoi: the plane is cut into cells, each cell gets its
     own height and its own slope, and a point takes the plane of whichever
@@ -878,25 +1018,38 @@ def _plate_height(x: float, y: float, scale: float) -> float:
     is asking. That is what lets three surfaces that share a vertex displace it
     identically and keep the solid closed.
     """
-    px, py = x * scale, y * scale
+    # Domain warp first: bend the plane, then cut it into cells. Warping the
+    # lookup rather than the result is what varies the cells' *shapes* -- a
+    # warp applied to the height afterwards would leave the same round,
+    # same-sized cells and merely wobble their tops.
+    px = x * scale + _CRYSTAL_WARP * _signed_noise2(x, y, _CRYSTAL_SALT + 9)
+    py = y * scale + _CRYSTAL_WARP * _signed_noise2(x, y, _CRYSTAL_SALT + 11)
     ix, iy = math.floor(px), math.floor(py)
 
     best = 1e30
     height = 0.0
+    tilt_x = tilt_y = 0.0
     for gy in range(iy - 1, iy + 2):
         for gx in range(ix - 1, ix + 2):
-            sx = gx + _hash2i(gx, gy, _CRYSTAL_SALT + 4)
-            sy = gy + _hash2i(gx, gy, _CRYSTAL_SALT + 5)
+            sx, sy, base, tx, ty = _plate_cell(gx, gy)
             dx, dy = px - sx, py - sy
             d = dx * dx + dy * dy
             if d < best:
                 best = d
-                height = (
-                    2.0 * _hash2i(gx, gy, _CRYSTAL_SALT + 6) - 1.0
-                    + _CRYSTAL_TILT * (2.0 * _hash2i(gx, gy, _CRYSTAL_SALT + 7) - 1.0) * dx
-                    + _CRYSTAL_TILT * (2.0 * _hash2i(gx, gy, _CRYSTAL_SALT + 8) - 1.0) * dy
-                )
-    return height
+                tilt_x, tilt_y = tx, ty
+                height = base + tx * dx + ty * dy
+    return height, tilt_x, tilt_y
+
+
+def _ends_fade(x: float) -> float:
+    """1 in the middle of a parameter's range, 0 at both ends.
+
+    Pinning the ends is what keeps the patch's boundary where the rest of the
+    solid expects it: the apex, the inset chain and the two radial chains are
+    all parameter lines, and every one of them is shared with a surface that
+    is not this one.
+    """
+    return 4.0 * x * (1.0 - x)
 
 
 def _rim_fade(u: float) -> float:
@@ -947,7 +1100,41 @@ def _mix_normal(smooth, flat, w: float) -> tuple:
     return (nx / length, ny / length, nz / length)
 
 
-def _crystal_facets(points, normals, height, vary, clear, index):
+def _panel_normal(points, normals, crystal, scale):
+    """Normal of the *plate* a triangle sits on, not of the triangle.
+
+    This is the difference between a crust of uniform little facets and one of
+    panels. The mesh is a ring-and-slot grid, so every triangle on it is
+    roughly the same size; shade each independently and the eye reads that
+    regularity straight through however chaotic the heights are. Give every
+    triangle inside one Voronoi cell the same normal and the *plate* becomes
+    the visible facet -- and plates come in whatever sizes and shapes the cell
+    structure produced, which is the point.
+
+    The cap underneath is curved, so the plate's plane is not simply its tilt.
+    Recover the smooth cap's own gradient from the analytic normal it already
+    carries (for z = f(x, y) the normal runs parallel to (-f_x, -f_y, 1)), add
+    the plate's, and rebuild.
+    """
+    cx = sum(p[0] for p in points) / 3.0
+    cy = sum(p[1] for p in points) / 3.0
+
+    smooth = _normalize((
+        sum(n[0] for n in normals),
+        sum(n[1] for n in normals),
+        sum(n[2] for n in normals),
+    ))
+    nz = smooth[2] if abs(smooth[2]) > 1e-6 else 1e-6
+    _h, tilt_x, tilt_y = _plate_sample(cx, cy, scale)
+    return _normalize((
+        smooth[0] / nz - crystal * tilt_x * scale,
+        smooth[1] / nz - crystal * tilt_y * scale,
+        1.0,
+    ))
+
+
+def _crystal_facets(points, normals, height, vary, clear, index,
+                    panel_normal=None, panel: float = 0.0):
     """One cap triangle, emitted as three flat facets around a centre tip.
 
     Yields ``(triangle, uvs, normals)``. This is where the cap stops being
@@ -986,14 +1173,29 @@ def _crystal_facets(points, normals, height, vary, clear, index):
     facet_n = (nx / twice_area, ny / twice_area, nz / twice_area)
     size = math.sqrt(0.5 * twice_area)
 
+    # Adopt the plate's normal -- but only if this triangle is plausibly *in*
+    # the plate. A cell boundary is a step in the height field, so the
+    # triangles that straddle one are near-vertical fracture walls whose real
+    # normal has nothing to do with either plate's plane; shading those as if
+    # they lay flat turns every fracture into a smear. Where the two normals
+    # already broadly agree the triangle is interior and takes the panel's;
+    # where they do not, it is a wall and keeps its own.
+    if panel_normal is not None and panel > 0.0:
+        agree = (facet_n[0] * panel_normal[0] + facet_n[1] * panel_normal[1]
+                 + facet_n[2] * panel_normal[2])
+        t = min(1.0, max(0.0, (agree - 0.55) / 0.30))
+        facet_n = _mix_normal(
+            facet_n, panel_normal, panel * t * t * (3.0 - 2.0 * t)
+        )
+
     # Barycentric tip position. Weights are perturbed about 1/3 and then
     # renormalised, so they stay strictly positive and the tip stays strictly
     # inside the triangle -- which is what guarantees the three side facets
     # are non-degenerate and that the tip's planar position is inside the
     # base's, so its UV cannot escape the face.
-    w0 = 1.0 + _CRYSTAL_JITTER * (_hash01(index, _CRYSTAL_SALT) - 0.5)
-    w1 = 1.0 + _CRYSTAL_JITTER * (_hash01(index, _CRYSTAL_SALT + 1) - 0.5)
-    w2 = 1.0 + _CRYSTAL_JITTER * (_hash01(index, _CRYSTAL_SALT + 2) - 0.5)
+    w0 = 1.0 + _CRYSTAL_TIP_JITTER * (_hash01(index, _CRYSTAL_SALT) - 0.5)
+    w1 = 1.0 + _CRYSTAL_TIP_JITTER * (_hash01(index, _CRYSTAL_SALT + 1) - 0.5)
+    w2 = 1.0 + _CRYSTAL_TIP_JITTER * (_hash01(index, _CRYSTAL_SALT + 2) - 0.5)
     total = w0 + w1 + w2
     w0, w1, w2 = w0 / total, w1 / total, w2 / total
 
@@ -1114,7 +1316,9 @@ def _wedge_bounds(data: array.array) -> list:
 def _build_geometry(subdiv: int = 0, bulge: float = 0.0, crystal: float = 0.0,
                     crystal_density: int = 0, crystal_vary: float = 0.5,
                     crystal_clear: float = 0.0, crystal_scale: float = 3.0,
-                    crystal_spike: float = 0.0) -> array.array:
+                    crystal_spike: float = 0.0,
+                    crystal_jitter: float = 0.0,
+                    crystal_panel: float = 0.0) -> array.array:
     """Extrude the outline into a solid, one wedge per edge.
 
     Each wedge contributes a front face, a front bevel, a side wall, a back
@@ -1138,6 +1342,11 @@ def _build_geometry(subdiv: int = 0, bulge: float = 0.0, crystal: float = 0.0,
         _CRYSTAL_SUBDIV_MAX,
     )
     crystalline = crystal > 0.0 or crystal_spike > 0.0
+    # Jitter is only meaningful once the cap is flat-shaded: on the smooth cap
+    # the creases it would randomise are not drawn at all, and moving the
+    # vertices would achieve nothing but a different set of interpolation
+    # errors under the numerals.
+    jitter = max(0.0, min(1.0, crystal_jitter)) if crystalline else 0.0
     apex_z = _front_profile_z(0.0, 0.0, 0.0, bulge)
     front_apex = (0.0, 0.0, apex_z)
     back_apex = (0.0, 0.0, -_THICKNESS - _BACK_PEAK_Z)
@@ -1161,6 +1370,7 @@ def _build_geometry(subdiv: int = 0, bulge: float = 0.0, crystal: float = 0.0,
             crystal,
             crystal_scale,
             crystal_clear,
+            jitter,
         )
         _accumulate_patch_normals(slot_normals, accum)
         patches.append(rings)
@@ -1208,6 +1418,9 @@ def _build_geometry(subdiv: int = 0, bulge: float = 0.0, crystal: float = 0.0,
         for tri_index, tri in enumerate(_patch_triangles(rings)):
             points = [rings[j][k] for j, k in tri]
             normals = [cap_normals[_normal_key(p)] for p in points]
+            panel_n = None
+            if crystal_panel > 0.0 and crystal > 0.0:
+                panel_n = _panel_normal(points, normals, crystal, crystal_scale)
             if not crystalline:
                 _add_triangle_smooth(
                     data,
@@ -1219,7 +1432,7 @@ def _build_geometry(subdiv: int = 0, bulge: float = 0.0, crystal: float = 0.0,
                 continue
             for facet, uvs, facet_normals in _crystal_facets(
                 points, normals, crystal_spike, crystal_vary, crystal_clear,
-                i * _CRYSTAL_STRIDE + tri_index,
+                i * _CRYSTAL_STRIDE + tri_index, panel_n, crystal_panel,
             ):
                 _add_triangle_smooth(data, facet, uvs, facet_normals, piece)
 
@@ -1602,13 +1815,17 @@ class ShardWidget(QOpenGLWidget):
         clear = max(0.0, float(self.params.crystal_clear))
         scale = max(0.1, float(self.params.crystal_scale))
         spike = max(0.0, float(self.params.crystal_spike))
-        key = (subdiv, bulge, crystal, density, vary, clear, scale, spike)
+        jitter = max(0.0, min(1.0, float(self.params.crystal_jitter)))
+        panel = max(0.0, min(1.0, float(self.params.crystal_panel)))
+        key = (subdiv, bulge, crystal, density, vary, clear, scale, spike,
+               jitter, panel)
         if key == self._geometry_key:
             return False
 
         self._geometry_key = key
         self._vertex_data = _build_geometry(
-            subdiv, bulge, crystal, density, vary, clear, scale, spike
+            subdiv, bulge, crystal, density, vary, clear, scale, spike,
+            jitter, panel,
         )
         self._vertex_count = len(self._vertex_data) // _FLOATS_PER_VERTEX
         self._geometry_dirty = True

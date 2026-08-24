@@ -128,6 +128,8 @@ _GEOMETRY_SLIDERS = [
 _CRYSTAL_SLIDERS = [
     ("crystal", 0.0, 0.08),
     ("crystal_scale", 0.5, 8.0),
+    ("crystal_jitter", 0.0, 1.0),
+    ("crystal_panel", 0.0, 1.0),
     ("crystal_density", 0.0, 2.0, 1),
     ("crystal_spike", 0.0, 1.5),
     ("crystal_vary", 0.0, 1.0),

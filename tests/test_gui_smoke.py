@@ -1043,6 +1043,108 @@ class CrystalFrontTest(unittest.TestCase):
             for normal in tri_normals:
                 self.assertEqual(normal, (0.0, 0.0, 1.0))
 
+    def test_jitter_never_inverts_a_cap_triangle(self):
+        """The one real hazard of moving the mesh around.
+
+        _add_triangle_smooth fixes winding from the sign of the projected area,
+        and paintGL culls by orientation to order its two transparency passes.
+        Let a vertex overtake a neighbour and a triangle projects inside out:
+        the winding fix then "corrects" it the wrong way and the facet sorts
+        into the wrong pass. _CRYSTAL_JITTER_MAX is set below half the vertex
+        spacing so this cannot happen; checked past the top of the slider,
+        because the margin is the thing being tested, not the setting.
+        """
+        from naive_timer.shard import (
+            _BEVEL_INSET, _OUTLINE, _front_patch, _patch_triangles,
+        )
+
+        def patch(i, jitter):
+            ax, ay = _OUTLINE[i]
+            bx, by = _OUTLINE[(i + 1) % len(_OUTLINE)]
+            return _front_patch(
+                (ax * _BEVEL_INSET, ay * _BEVEL_INSET, 0.05),
+                (bx * _BEVEL_INSET, by * _BEVEL_INSET, 0.05),
+                (ax, ay, 0.0), (bx, by, 0.0), 16, 0.65,
+                0.045, 4.0, 0.0, jitter,
+            )[0]
+
+        for jitter in (0.0, 0.5, 1.0, 1.5):
+            for i in range(len(_OUTLINE)):
+                rings = patch(i, jitter)
+                signs = set()
+                for tri in _patch_triangles(rings):
+                    a, b, c = (rings[j][k] for j, k in tri)
+                    area = ((b[0] - a[0]) * (c[1] - a[1])
+                            - (b[1] - a[1]) * (c[0] - a[0]))
+                    self.assertNotEqual(area, 0.0, "degenerate cap triangle")
+                    signs.add(area > 0.0)
+                self.assertEqual(
+                    len(signs), 1,
+                    f"cap triangle inverted at jitter={jitter} wedge={i}",
+                )
+
+    def test_jitter_keeps_neighbouring_wedges_in_agreement(self):
+        """Jitter is a continuous function of position, and has to stay one.
+
+        A hash of the ring and slot indices would be the obvious way to jitter
+        a mesh and it is the way that tears this one: wedge i numbers its
+        shared chain as slot j while its neighbour numbers the same chain slot
+        0. Only something keyed on where the vertex *is* gives both the same
+        answer -- and it has to be continuous as well as positional, since the
+        two wedges reach that position by different arithmetic and land an ulp
+        apart.
+        """
+        from naive_timer.shard import (
+            _BEVEL_INSET, _OUTLINE, _ends_fade, _front_patch,
+        )
+
+        self.assertEqual(_ends_fade(0.0), 0.0)
+        self.assertEqual(_ends_fade(1.0), 0.0)
+
+        def patch(i):
+            ax, ay = _OUTLINE[i]
+            bx, by = _OUTLINE[(i + 1) % len(_OUTLINE)]
+            return _front_patch(
+                (ax * _BEVEL_INSET, ay * _BEVEL_INSET, 0.05),
+                (bx * _BEVEL_INSET, by * _BEVEL_INSET, 0.05),
+                (ax, ay, 0.0), (bx, by, 0.0), 16, 0.65,
+                0.045, 4.0, 0.0, 1.0,
+            )[0]
+
+        for i in range(len(_OUTLINE)):
+            here, nxt = patch(i), patch((i + 1) % len(_OUTLINE))
+            for j in range(len(here)):
+                for axis in range(3):
+                    self.assertAlmostEqual(
+                        here[j][j][axis], nxt[j][0][axis], places=9,
+                        msg=f"wedges {i}/{i + 1} disagree at ring {j}",
+                    )
+
+    def test_panel_shading_moves_no_geometry(self):
+        """crystal_panel reassigns normals; it must not touch a position.
+
+        Stated as a test because the temptation when a panel does not read as
+        flat enough is to flatten the mesh under it, and that would put
+        displacement back on shared vertices for a purely cosmetic reason.
+        """
+        from naive_timer.shard import _FLOATS_PER_VERTEX as stride
+        from naive_timer.shard import _build_geometry
+
+        flat = _build_geometry(2, 0.65, 0.045, 1, 0.5, 0.0, 4.0, 0.0, 0.7, 0.0)
+        panelled = _build_geometry(
+            2, 0.65, 0.045, 1, 0.5, 0.0, 4.0, 0.0, 0.7, 1.0
+        )
+        self.assertEqual(len(flat), len(panelled))
+        moved = normals_changed = 0
+        for v in range(len(flat) // stride):
+            off = v * stride
+            if flat[off:off + 3] != panelled[off:off + 3]:
+                moved += 1
+            if flat[off + 3:off + 6] != panelled[off + 3:off + 6]:
+                normals_changed += 1
+        self.assertEqual(moved, 0, "crystal_panel displaced geometry")
+        self.assertGreater(normals_changed, 0, "crystal_panel did nothing")
+
     def test_the_inset_ring_is_never_displaced(self):
         """The fracture field must die before it reaches the bevel.
 
