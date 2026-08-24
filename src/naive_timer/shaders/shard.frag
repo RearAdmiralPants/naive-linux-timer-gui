@@ -32,8 +32,47 @@ uniform float uEtch;          // 0 = emissive/lit, 1 = etched into the glass
 uniform float uEtchDepth;     // how sharply the engraving tilts the normal
 uniform float uBaseAlpha;
 
-uniform sampler2D uTerrain;      // ice-ball micro relief, normals in RGB
-uniform float uTerrainStrength;  // 0 = off (terrain amplitude is 0)
+uniform sampler2D uNormalMap; // micro-detail terrain normals (tangent space)
+uniform float uTerrainDetail; // 0 disables; strength of the grain tilt
+
+// Value noise, copied from sky.frag so the two surfaces share one character.
+float hash31(vec3 p) {
+    p = fract(p * vec3(127.1, 311.7, 74.7));
+    p += dot(p, p.zyx + 19.19);
+    return fract((p.x + p.y) * p.z);
+}
+
+float noise3(vec3 p) {
+    vec3 i = floor(p);
+    vec3 f = fract(p);
+    f = f * f * (3.0 - 2.0 * f);          // smoothstep, kills lattice creases
+
+    float n000 = hash31(i + vec3(0.0, 0.0, 0.0));
+    float n100 = hash31(i + vec3(1.0, 0.0, 0.0));
+    float n010 = hash31(i + vec3(0.0, 1.0, 0.0));
+    float n110 = hash31(i + vec3(1.0, 1.0, 0.0));
+    float n001 = hash31(i + vec3(0.0, 0.0, 1.0));
+    float n101 = hash31(i + vec3(1.0, 0.0, 1.0));
+    float n011 = hash31(i + vec3(0.0, 1.0, 1.0));
+    float n111 = hash31(i + vec3(1.0, 1.0, 1.0));
+
+    return mix(
+        mix(mix(n000, n100, f.x), mix(n010, n110, f.x), f.y),
+        mix(mix(n001, n101, f.x), mix(n011, n111, f.x), f.y),
+        f.z
+    );
+}
+
+float fbm3(vec3 p) {
+    float sum = 0.0;
+    float amp = 0.5;
+    for (int i = 0; i < 4; i++) {
+        sum += amp * noise3(p);
+        p *= 2.03;                         // not exactly 2: avoids axis banding
+        amp *= 0.5;
+    }
+    return sum;
+}
 
 uniform float uAlarm;         // 0..1, pulses after the countdown hits zero
 
@@ -77,14 +116,18 @@ void main() {
         N = normalize(N - uEtch * vec3(grad * uEtchDepth, 0.0));
     }
 
-    // Ice-ball micro relief: tangent-space normal from the baked map. The cap
-    // is near-front-facing and UVs are planar, so treating the map's xy as
-    // world xy is a good approximation -- the same assumption the etch bump
-    // makes above (more approximate once the geometry itself is displaced,
-    // which is fine for a stylised surface).
-    if (uTerrainStrength > 0.0) {
-        vec3 tn = texture(uTerrain, vUV).rgb * 2.0 - 1.0;
-        N = normalize(N + uTerrainStrength * vec3(tn.x, tn.y, 0.0));
+    // Micro-detail terrain: the macro displacement lives in the geometry, but
+    // grain finer than a facet has to come from lighting. Sample the baked
+    // normal map and tilt N by it. The map is tangent-space (z up), so the
+    // tilt is applied in the surface's own frame -- build that frame from N
+    // with an arbitrary-but-stable tangent, which is enough for a symmetric
+    // grain whose only job is to break the glass up into ice.
+    if (uTerrainDetail > 0.0) {
+        vec3 mapN = texture(uNormalMap, vUV).rgb * 2.0 - 1.0;
+        mapN.z = max(mapN.z, 0.1);          // never tilt past vertical
+        vec3 T = normalize(cross(N, vec3(0.0, 0.0, 1.0)) + vec3(1e-4));
+        vec3 B = cross(N, T);
+        N = normalize(N + uTerrainDetail * (mapN.x * T + mapN.y * B - mapN.z * N) * 0.5);
     }
 
     vec3 L = normalize(uLightPos - vWorld);

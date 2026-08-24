@@ -116,13 +116,15 @@ _SLIDERS = [
 _GEOMETRY_SLIDERS = [
     ("front_subdiv", 0.0, 5.0, 1),
     ("front_bulge", 0.0, 1.0),
-    # Ice-ball terrain. amplitude/scale/roughness/seed retessellate the cap;
-    # detail re-bakes only the normal map (lighting, not vertices).
-    ("terrain_amplitude", 0.0, 0.25),
-    ("terrain_scale", 0.5, 8.0),
-    ("terrain_roughness", 0.0, 1.0),
-    ("terrain_seed", 0.0, 64.0, 1),
-    ("terrain_detail", 0.0, 1.0),
+]
+
+# Terrain retessellates too (terrain) or re-bakes the normal map
+# (terrain_scale); terrain_detail is a plain uniform. The cap's z-range is only
+# ~0.14, so amplitude tops out at 0.10 -- past that it reads as crumpled paper.
+_TERRAIN_SLIDERS = [
+    ("terrain", 0.0, 0.10),
+    ("terrain_scale", 0.5, 6.0),
+    ("terrain_detail", 0.0, 2.0),
 ]
 
 _SHATTER_SLIDERS = [
@@ -258,6 +260,7 @@ class TuningPanel(QWidget):
 
         left.addWidget(self._slider_group("Glass", _SLIDERS))
         left.addWidget(self._slider_group("Front face", _GEOMETRY_SLIDERS))
+        left.addWidget(self._slider_group("Terrain", _TERRAIN_SLIDERS))
         right.addWidget(self._slider_group("Camera", _CAMERA_SLIDERS))
         right.addWidget(self._slider_group("Sky", _SKY_SLIDERS))
         right.addWidget(self._slider_group("Shatter", _SHATTER_SLIDERS))
@@ -494,7 +497,7 @@ class TuningPanel(QWidget):
         p: ShardParams = self._params
         print("\n# --- paste into ShardParams defaults ---")
         for name, _lo, _hi, *_ in (
-            _SLIDERS + _GEOMETRY_SLIDERS + _POST_SLIDERS
+            _SLIDERS + _GEOMETRY_SLIDERS + _TERRAIN_SLIDERS + _POST_SLIDERS
             + _CAMERA_SLIDERS + _SKY_SLIDERS + _SHATTER_SLIDERS
         ):
             print(f"    {name}: float = {getattr(p, name):.2f}")
