@@ -30,7 +30,26 @@ On shatter:
     impact flash is not. Subtler than it sounds -- see HANDOFF for the
     saturation numbers and why rotating the lamp's hue does not work.
 - Warm up the sound ~1s before shattering so e.g. bluetooth sinks don't miss the first 1/4s
+  - Half-done: ALERT_WARMUP_S opens the client stream 1 s ahead of the
+    countdown's zero. That is not the same as *resuming a suspended sink*,
+    which is what a Bluetooth sink actually needs; that wants a silent play,
+    still unimplemented. And the Stopwatch's Reset shatter (which now makes a
+    sound) gets no warning at all -- a button press cannot be seen coming, so
+    only a silent pre-roll would help it.
 
+
+On the alert, after the shatter:
+- [x] Full-frame pulse in the light colour once the pieces are gone
+      (`strobe_*`): parabolic approach to 90%, just under once a second,
+      starting 10 s after the break. Most of each cycle sits near zero.
+- [x] The Timer's alert no longer expires -- glitter, then strobing over an
+      empty starfield, until Dismiss / a new countdown / switching to the
+      Stopwatch. The chime still stops at `alert_duration` (120 s); only the
+      sound is bounded now.
+- [x] The Stopwatch's Reset shatter makes a sound (glass only, no chime). It
+      never had one -- which is why the audio looked broken.
+- The strobe is confined to the 3D view, not the whole window: the buttons and
+  the tab bar stay as they are. Widen it if the pulse needs to be louder.
 
 ---
 - Optimizations

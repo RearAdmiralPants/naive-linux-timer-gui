@@ -441,6 +441,8 @@ class StopwatchWidget(QWidget):
         self._shard = ShardWidget(self._sw, params)
         # True from the Reset shatter until the pieces clear and we zero out.
         self._resetting = False
+        # Lives only for the length of a reset; see _ShatterPlayer.
+        self._shatter_sound: "_ShatterPlayer | None" = None
 
         self._start_btn = QPushButton("Start")
         self._start_btn.clicked.connect(self._on_toggle)
@@ -479,7 +481,13 @@ class StopwatchWidget(QWidget):
             return
         self._resetting = True
         self._sw.pause()
-        self._shard.set_alarm(True)
+        # No strobe: the pulse means "this alarm is still going and you have
+        # not dealt with it". A reset has nothing to say afterwards -- it
+        # reassembles at zero on its own.
+        self._shard.set_alarm(True, strobe=False)
+        if _HAVE_AUDIO:
+            self._shatter_sound = _ShatterPlayer()
+            self._shatter_sound.play()
         self._start_btn.setText("Start")
 
     def _tick(self) -> None:
@@ -487,6 +495,12 @@ class StopwatchWidget(QWidget):
             self._sw.reset()
             self._shard.set_alarm(False)  # reassemble at zero
             self._resetting = False
+            # The clip is shorter than the shatter it accompanies, so by here
+            # it has finished on its own; stop() only matters if someone has
+            # shortened shatter_clear_s below the length of the sound.
+            if self._shatter_sound is not None:
+                self._shatter_sound.stop()
+                self._shatter_sound = None
         self._shard.set_text(format_elapsed(self._sw.elapsed()))
         self._shard.advance(self._clock.tick())
 
@@ -608,6 +622,18 @@ class TimerWidget(QWidget):
         self._cd.dismiss()
         self._stop_alert()
 
+    def dismiss_alert(self) -> bool:
+        """Dismiss a ringing alert from outside the tab. True if one was up.
+
+        Leaving for the Stopwatch counts as dealing with it -- the alert no
+        longer stops by itself, so every way out of it has to be wired
+        explicitly or the strobe would be waiting on the user's return.
+        """
+        if not self._alerting:
+            return False
+        self._on_dismiss()
+        return True
+
     def _stop_alert(self) -> None:
         self._alerting = False
         self._dismiss_btn.setVisible(False)
@@ -637,7 +663,11 @@ class TimerWidget(QWidget):
         """
         if not _HAVE_AUDIO:
             return
-        imminent = self._alerting or (
+        # `alert_active()` and not `_alerting`: the visual alert now outlives
+        # the audio one (see _tick), and this is the seam between them. When
+        # the alert window closes the player is released and the chime stops,
+        # while the shard goes on strobing.
+        imminent = (self._alerting and self._cd.alert_active()) or (
             self._cd.is_running and self._cd.remaining() <= ALERT_WARMUP_S
         )
         if imminent and self._alert is None:
@@ -651,15 +681,18 @@ class TimerWidget(QWidget):
         self._shard.advance(self._clock.tick())
         self._sync_alert_player()
 
-        # The alert is carried entirely by the shard: it fractures, then
-        # breathes dark red. No background flash -- that read as jarring.
-        if self._cd.alert_active():
-            if not self._alerting:
-                self._begin_alert()
-        elif self._alerting:
-            # Alert window elapsed on its own.
-            self._stop_alert()
-            self._start_btn.setText("Start")
+        # The alert is carried entirely by the shard: it fractures, the pieces
+        # glint as they fall, and once they are gone the frame pulses.
+        #
+        # It does not end on its own. `alert_duration` still governs the
+        # *chime* -- _sync_alert_player releases the player when the window
+        # closes, which is what stops the sound -- but the visual alert stays
+        # up until the user deals with it: Dismiss, starting another countdown,
+        # or leaving for the Stopwatch tab. An alarm that quietly tidies itself
+        # away after two minutes is an alarm you can miss entirely, and with
+        # nothing left on screen afterwards you would never know it had rung.
+        if self._cd.alert_active() and not self._alerting:
+            self._begin_alert()
 
     def _begin_alert(self) -> None:
         self._alerting = True
@@ -673,6 +706,40 @@ class TimerWidget(QWidget):
         self._shard.set_alarm(True)
         if self._alert is not None:
             self._alert.play()
+
+
+class _ShatterPlayer:
+    """The glass, once, with no chime after it.
+
+    The Stopwatch's Reset breaks the shard exactly as the alarm does, and until
+    now did it in silence -- the sound was only ever wired to the countdown's
+    zero-crossing, so anyone testing the break from the Stopwatch (the quick
+    way, with no countdown to wait out) heard nothing and reasonably concluded
+    the audio was broken.
+
+    Not an _AlertPlayer with the chime muted: a reset is not an alert. Nothing
+    is waiting on the user afterwards, so nothing should go on ringing.
+
+    Built at the button press and released when the pieces clear, following the
+    same rule as the alert player -- no QSoundEffect exists outside the moment
+    it is needed (see _sync_alert_player for what that rule is protecting
+    against). One consequence worth naming: a reset gives no warning, so there
+    is no warm-up window here at all, and on a sink that has to wake up (a
+    Bluetooth headset) the crack will lose its first fraction of a second. The
+    countdown can warm up ALERT_WARMUP_S ahead; a button press cannot.
+    """
+
+    def __init__(self) -> None:
+        self._shatter = QSoundEffect()
+        self._shatter.setSource(QUrl.fromLocalFile(sound.default_shatter_path()))
+        self._shatter.setLoopCount(1)
+        self._shatter.setVolume(0.9)
+
+    def play(self) -> None:
+        self._shatter.play()
+
+    def stop(self) -> None:
+        self._shatter.stop()
 
 
 class _AlertPlayer:
@@ -718,6 +785,7 @@ class MainWindow(QTabWidget):
         self.timer_tab = TimerWidget(self.shard_params)
         self.addTab(self.stopwatch_tab, "Stopwatch")
         self.addTab(self.timer_tab, "Timer")
+        self.currentChanged.connect(self._on_tab_changed)
 
         # "Stay on top" toggle in the top-right corner (right of the tabs).
         self._above = stay_on_top()
@@ -736,6 +804,11 @@ class MainWindow(QTabWidget):
             seconds, display_text, mode = timer_value
             self.timer_tab.start_with(seconds, display_text, mode)
             self.setCurrentWidget(self.timer_tab)
+
+    def _on_tab_changed(self, _index: int) -> None:
+        """Walking away from the Timer dismisses whatever it was ringing."""
+        if self.currentWidget() is not self.timer_tab:
+            self.timer_tab.dismiss_alert()
 
     def shards(self) -> list[ShardWidget]:
         return [self.stopwatch_tab._shard, self.timer_tab._shard]

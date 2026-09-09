@@ -23,6 +23,15 @@ uniform float uBloomStrength;   // 0 = no glare at all
 uniform float uFlareStrength;   // 0 = no ghosts, halo or streaks
 uniform float uRolloff;         // shoulder; see the note below
 
+// The strobe: a flat wash over the finished frame, once the shard has broken
+// and its pieces have long gone. Opacity, not radiance -- it is applied after
+// the tonemap, so uStrobe is literally "how much of the frame is this colour"
+// and 0.9 means 90%. Putting it upstream in linear light would make the number
+// mean nothing (0.9 radiance of white is a mid grey after the curve) and would
+// hand the wash to the glare and flare passes as if it were a light source.
+uniform vec3 uStrobeColor;
+uniform float uStrobe;          // 0 = nothing; see _strobe_alpha in shard.py
+
 void main() {
     vec3 c = texture(uScene, vUV).rgb * uExposure;
 
@@ -44,6 +53,9 @@ void main() {
     // so uRolloff is the headroom control: raise it alongside light_intensity.
     // At 1.0 and above it asymptotes and never clips at all.
     c = c / (1.0 + c * uRolloff);
+
+    // Last of all, over everything, including the stars.
+    c = mix(c, uStrobeColor, uStrobe);
 
     FragColor = vec4(c, 1.0);
 }

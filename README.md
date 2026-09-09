@@ -24,7 +24,13 @@ and verified without a display; the Qt layer is a thin view on top.
   and flashing as they fall — transient lights are spawned beside them, in the
   hemisphere you are watching from, so the glass catches the light instead of
   waiting to be lucky — plus a gentle chime that loops quietly for ~2 minutes
-  (configurable) or until you hit **Dismiss**
+  (configurable)
+- Once the pieces have gone the whole view pulses in the light's colour, about
+  once a second, and **keeps pulsing**: the alert does not expire. It ends when
+  you hit **Dismiss**, start another countdown, or switch to the Stopwatch. The
+  chime still stops on its own after its window; only the sound is bounded
+- The Stopwatch's **Reset** breaks the shard too, and cracks out loud — the
+  glass only, no chime, since nothing is waiting on you afterwards
 - Both the chime and the shatter are synthesized at runtime (no binary asset);
   point the alert at your own WAV to customize
 
@@ -212,6 +218,12 @@ instead of picking out a facet. `spark_impact` is separate: one much brighter
 flash at the break itself, shaped like the attack of the shatter sound, which
 is played on the same line that breaks the shard. `spark_hue` scatters each
 glint's colour a little, since glass splits what it reflects.
+
+The `strobe_*` group is what happens after all of that, when the pieces have
+left the frame and the alarm is still going: the whole view pulses in the
+light's colour. `strobe_peak` is the opacity at the top of each pulse (0 turns
+it off), `strobe_shape` is how much of each cycle is spent dark — 2.0, the
+default, is the parabola, and lower flattens it toward a fade.
 
 Sliders ignore the mouse wheel unless you click one first — otherwise scrolling
 the panel would rewrite every value the pointer crossed.

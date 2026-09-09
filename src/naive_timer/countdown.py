@@ -34,6 +34,12 @@ class Countdown:
     While RUNNING, ``remaining()`` shrinks. On reaching zero it transitions to
     FINISHED and ``alert_active()`` stays true for ``alert_duration`` seconds
     (or until :meth:`dismiss`).
+
+    Note what that window does and does not govern. It is the *audible* alert:
+    the app releases its sound player when it closes, and the chime stops. The
+    visual alert -- the break, the glints, the strobe -- runs until the user
+    dismisses it, restarts the countdown or leaves the tab, and so is not
+    bounded by anything here. See ``TimerWidget._tick``.
     """
 
     total: float = 0.0

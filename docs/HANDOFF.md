@@ -6,8 +6,9 @@ not transfer between the web/mobile app and a local terminal session. The code
 travels via git; this document travels the *reasoning* that isn't obvious from
 the diff.
 
-_Last updated: 2026-09-08, after the shatter glints landed on
-`feat/shatter-lights-flash`. (HDR lighting pipeline: 2026-08-10.)_
+_Last updated: 2026-09-09, after the strobe and the non-expiring alert landed
+on `feat/shatter-lights-flash`. (Shatter glints: 2026-09-08. HDR lighting
+pipeline: 2026-08-10.)_
 
 The project brief that started all of this is `CLAUDE.md` at the repo root —
 read it first. It states the actual goal (probing accelerated 3D across
@@ -238,6 +239,65 @@ Notes for whoever touches the shatter next:
     agree**. When more sparks are alive than that, the brightest survive.
     While the shard is intact `uSparkCount` is 0, so this costs nothing until
     the break.
+
+### The alert does not end by itself (2026-09-09)
+
+The countdown's `alert_duration` (120 s) now governs only the **chime**. The
+visual alert -- break, glints, strobe -- runs until the user dismisses it,
+starts another countdown, or leaves for the Stopwatch tab. The seam is one line
+in `TimerWidget._sync_alert_player`: `imminent` is
+`self._alerting and self._cd.alert_active()`, so when the audible window closes
+the player is released (which is what stops the sound) while `_alerting` stays
+true and the shard goes on strobing.
+
+Because it no longer stops on its own, **every exit has to be wired**. There are
+three: Dismiss, starting another countdown (`start()` already called
+`_stop_alert`), and `MainWindow._on_tab_changed`. If you add a fourth way to
+leave the alert, wire it or the strobe waits behind a tab forever.
+
+### The strobe
+
+`_strobe_alpha` in `shard.py`, `uStrobe`/`uStrobeColor` in
+`post_composite.frag`. A flat wash in the light's colour over the finished
+frame, starting `strobe_delay_s` after the break, when the pieces have long gone
+and an alarm that is still ringing has nothing on screen to show for it.
+
+- **After the tonemap, deliberately.** That is what makes `strobe_peak = 0.9`
+  mean "90% of the frame is this colour". Upstream in linear light the number
+  would mean nothing (radiance 0.9 of white is a mid grey once the curve has
+  had it) and the glare and flare passes would treat the wash as a light
+  source and bloom it.
+- **Parabolic, and that is the point.** `alpha = peak * |2*phase - 1| **
+  shape`: minimum mid-cycle, peak at the edges. At the default shape of 2 it
+  sits below half peak for 71% of every cycle, which is what makes it read as
+  a pulse in the dark rather than as a light left flickering. Shape 1.0 is a
+  triangle wave and looks like a fade; it is pinned by
+  `test_most_of_the_cycle_is_spent_dark`.
+- **The phase is offset half a cycle** so the first pulse builds. Opening on
+  the cusp put a full-strength flash on the frame the delay expired, which
+  reads as a glitch rather than as the start of something.
+- **`strobe=False` on `set_alarm`** is what separates an alert from a
+  transition. The Stopwatch's Reset breaks the shard the same way, but nothing
+  is waiting on the user afterwards -- it reassembles at zero on its own -- so
+  it must not pulse. Only the caller knows which kind of break it is.
+
+### The Stopwatch's Reset was silent, and that looked like broken audio
+
+Reported as "no sound at all today". It was not a regression and not the audio
+stack: the shatter clip was only ever wired to the countdown's zero-crossing,
+so breaking the shard from the Stopwatch -- the quick way to look at the break,
+with no countdown to wait out -- had never made a sound. `_ShatterPlayer` now
+plays the glass there (no chime; a reset is not an alert).
+
+**How it was diagnosed, because guessing would have cost hours.** `parec` on the
+default sink's monitor while the *real app* ran `--timer 4s` under `xvfb-run`,
+then RMS per quarter-second window: shatter at peak 0.198, chime looping every
+2 s after it. That proved the whole audio path end to end -- WAV, QSoundEffect,
+PulseAudio backend, sink routing -- in one measurement, and left the trigger as
+the only thing it could be. Recording the sink is the tool to reach for here;
+asking whether a human heard something tells you much less, much later.
+
+    parec --device=<sink>.monitor --format=s16le --rate=48000 --channels=2 > cap.raw
 
 ### How to check a shader change actually did something
 

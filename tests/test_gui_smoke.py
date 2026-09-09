@@ -895,6 +895,98 @@ class ShatterImpactTest(unittest.TestCase):
         )
 
 
+class StrobeTest(unittest.TestCase):
+    """The full-frame pulse that carries the alert once the pieces are gone."""
+
+    def test_nothing_until_the_delay_expires(self):
+        from naive_timer.shard import ShardParams, _strobe_alpha
+
+        p = ShardParams()
+        self.assertEqual(_strobe_alpha(0.0, p), 0.0)
+        self.assertEqual(_strobe_alpha(p.strobe_delay_s - 0.01, p), 0.0)
+        # And it opens *dark*: starting at the cusp would flash at full
+        # strength on the frame the delay expires, which reads as a glitch.
+        self.assertEqual(_strobe_alpha(p.strobe_delay_s, p), 0.0)
+
+    def test_it_reaches_the_peak_and_returns(self):
+        from naive_timer.shard import ShardParams, _strobe_alpha
+
+        p = ShardParams()
+        half = p.strobe_period_s / 2.0
+        self.assertAlmostEqual(
+            _strobe_alpha(p.strobe_delay_s + half, p), p.strobe_peak, places=6
+        )
+        self.assertAlmostEqual(
+            _strobe_alpha(p.strobe_delay_s + 2 * half, p), 0.0, places=6
+        )
+
+    def test_most_of_the_cycle_is_spent_dark(self):
+        """The shape is the point: a pulse, not a light left flickering.
+
+        With the default (parabolic) exponent the curve is below half peak for
+        1/sqrt(2) of every cycle. Asserted as a range, not a single number, so
+        retuning strobe_shape a little does not fail it -- but flattening it
+        into a triangle wave (shape 1.0, dark only half the time) does.
+        """
+        from naive_timer.shard import ShardParams, _strobe_alpha
+
+        p = ShardParams()
+        start = p.strobe_delay_s
+        samples = [
+            _strobe_alpha(start + i * p.strobe_period_s / 600.0, p)
+            for i in range(600)
+        ]
+        dark = sum(1 for v in samples if v < p.strobe_peak / 2.0) / len(samples)
+        self.assertGreater(dark, 0.62, "the strobe spends too long lit")
+        self.assertLess(dark, 0.80, "the strobe barely lights at all")
+        self.assertAlmostEqual(max(samples), p.strobe_peak, places=2)
+
+    def test_it_repeats_on_the_period(self):
+        from naive_timer.shard import ShardParams, _strobe_alpha
+
+        p = ShardParams()
+        for i in range(12):
+            when = p.strobe_delay_s + i * 0.17
+            self.assertAlmostEqual(
+                _strobe_alpha(when, p),
+                _strobe_alpha(when + p.strobe_period_s * 3.0, p),
+                places=6,
+            )
+
+    def test_peak_zero_is_the_off_switch(self):
+        from naive_timer.shard import ShardParams, _strobe_alpha
+
+        p = ShardParams(strobe_peak=0.0)
+        self.assertEqual(
+            max(_strobe_alpha(p.strobe_delay_s + i * 0.05, p) for i in range(200)),
+            0.0,
+        )
+
+    def test_a_reset_shatter_does_not_strobe(self):
+        """Only an *alert* pulses. The Stopwatch's Reset is a transition."""
+        from naive_timer.shard import ShardParams, ShardWidget
+
+        class Model:
+            is_running = False
+
+        widget = ShardWidget.__new__(ShardWidget)   # no GL needed for the flag
+        widget._alarm = False
+        widget._strobing = False
+        widget._spin = widget._spin_at_break = 0.0
+        widget._shatter_t = 0.0
+        widget._early_cleared = False
+        widget._next_clear_check = 0.0
+        widget.params = ShardParams()
+
+        ShardWidget.set_alarm(widget, True, strobe=False)
+        self.assertTrue(widget._alarm)
+        self.assertFalse(widget._strobing)
+
+        ShardWidget.set_alarm(widget, False)
+        ShardWidget.set_alarm(widget, True)
+        self.assertTrue(widget._strobing, "an alert must strobe by default")
+
+
 class CurvedFrontTest(unittest.TestCase):
     """The front-face subdivision and bulge sliders.
 
@@ -1694,6 +1786,119 @@ class GlTest(unittest.TestCase):
         timer._on_reset()
         self.assertIsNone(timer._alert, "held the stream open after reset")
 
+    def test_the_alert_outlives_its_chime(self):
+        """The sound stops at alert_duration; the visual alert does not stop.
+
+        This is the seam between the two windows. Once the audible window
+        closes the player must be handed back -- that is what silences the
+        chime -- while the shard stays broken and strobing until someone deals
+        with it. An alarm that tidies itself away after two minutes, leaving an
+        ordinary starfield, is one you can miss entirely.
+        """
+        from naive_timer import app
+        from naive_timer.app import MainWindow
+
+        window = MainWindow()
+        timer = window.timer_tab
+
+        now = [1000.0]
+        timer._cd.clock = lambda: now[0]
+        timer._cd.alert_duration = 5.0
+        timer._cd.configure(0.5)
+        timer._cd.start()
+
+        now[0] += 1.0          # past zero: the alert fires
+        timer._tick()
+        self.assertTrue(timer._alerting, "the alert never started")
+        self.assertTrue(timer._shard._alarm, "the shard never broke")
+        if app._HAVE_AUDIO:
+            self.assertIsNotNone(timer._alert, "no chime while the alert rings")
+
+        now[0] += 30.0         # far past alert_duration
+        timer._tick()
+        self.assertTrue(timer._alerting, "the visual alert stopped on its own")
+        self.assertTrue(timer._shard._alarm, "the shard reassembled on its own")
+        self.assertTrue(timer._shard._strobing, "nothing is left to see")
+        self.assertTrue(
+            timer._dismiss_btn.isVisibleTo(timer),
+            "no way left to dismiss it",
+        )
+        if app._HAVE_AUDIO:
+            self.assertIsNone(timer._alert, "the chime is still looping")
+
+        # Dismiss is still the way out, and it must end both.
+        timer._on_dismiss()
+        self.assertFalse(timer._alerting)
+        self.assertFalse(timer._shard._alarm)
+
+    def test_leaving_the_timer_tab_dismisses_the_alert(self):
+        """The alert no longer ends by itself, so every exit must be wired.
+
+        Switching to the Stopwatch is one the user named: they have walked away
+        from it, and a strobe waiting behind a tab for their return is not what
+        anyone means by dismissing an alarm.
+        """
+        from naive_timer.app import MainWindow
+
+        window = MainWindow()
+        timer = window.timer_tab
+        window.setCurrentWidget(timer)   # the Stopwatch is the default tab
+
+        now = [1000.0]
+        timer._cd.clock = lambda: now[0]
+        timer._cd.configure(0.5)
+        timer._cd.start()
+        now[0] += 1.0
+        timer._tick()
+        self.assertTrue(timer._alerting)
+
+        window.setCurrentWidget(window.stopwatch_tab)
+        self.assertFalse(timer._alerting, "the alert followed us to the other tab")
+        self.assertFalse(timer._shard._alarm)
+
+        # Coming back must not resurrect it.
+        window.setCurrentWidget(window.timer_tab)
+        timer._tick()
+        self.assertFalse(timer._alerting, "a dismissed alert came back")
+
+    def test_the_stopwatch_reset_breaks_the_glass_audibly(self):
+        """Reset shatters the shard on screen, so it must crack out loud too.
+
+        It did not, for as long as this feature has existed: the sound was
+        wired only to the countdown's zero-crossing, so testing the break from
+        the Stopwatch -- the quick way, with no countdown to wait out -- was
+        silent, and looked exactly like broken audio.
+        """
+        from naive_timer import app
+        from naive_timer.app import MainWindow
+
+        if not app._HAVE_AUDIO:
+            self.skipTest("QtMultimedia unavailable; the break is visual-only")
+
+        from PySide6.QtMultimedia import QSoundEffect
+
+        window = MainWindow()
+        stopwatch = window.stopwatch_tab
+        self.assertIsNone(stopwatch._shatter_sound, "holding a stream while idle")
+
+        stopwatch._on_reset()
+        player = stopwatch._shatter_sound
+        self.assertIsNotNone(player, "the reset shatter made no sound")
+        self.assertEqual(player._shatter.loopCount(), 1, "a looping smash")
+        self.assertIn(
+            "shatter", player._shatter.source().toLocalFile(),
+            "the reset is playing the wrong clip",
+        )
+        # No chime: a reset is not an alert, and nothing waits on the user.
+        self.assertFalse(hasattr(player, "_effect"))
+
+        # ... and the stream goes back when the pieces do.
+        stopwatch._shard._shatter_t = 1e6
+        stopwatch._tick()
+        self.assertIsNone(
+            stopwatch._shatter_sound, "held the stream open after the reset"
+        )
+
     def test_stay_on_top_reaches_the_window_manager(self):
         """The checkbox must change the WM's mind, not merely send a message.
 
@@ -2037,6 +2242,61 @@ class GlTest(unittest.TestCase):
             lit, dark * 1.5 + 20,
             f"glints changed nothing on screen ({dark} -> {lit} bright pixels)",
         )
+
+    def test_the_strobe_floods_the_finished_frame(self):
+        """The pulse has to survive the whole post chain and land on pixels.
+
+        Rendered at a trough and at a peak of the same pulse, with the pieces
+        long gone so there is nothing on screen but stars. At the peak the
+        frame must be overwhelmingly the light's colour; at the trough it must
+        look like the sky it was before.
+        """
+        from PySide6.QtWidgets import QApplication
+
+        from naive_timer.shard import ShardParams, ShardWidget
+
+        class Model:
+            is_running = False
+
+        params = ShardParams(
+            strobe_delay_s=10.0, strobe_period_s=1.0, strobe_peak=0.9,
+            light_color=(1.0, 0.2, 0.2),   # nothing else in the scene is red
+        )
+        shard = ShardWidget(Model(), params)
+        shard.resize(240, 320)
+        shard.set_text("00:00")
+        shard.show()
+        QApplication.processEvents()
+
+        shard.set_alarm(True)
+        shard._elapsed = 40.0
+
+        def render(shatter_t):
+            shard._shatter_t = shatter_t
+            shard.makeCurrent()
+            shard.paintGL()
+            image = shard.grabFramebuffer()
+            reds = 0
+            for y in range(0, image.height(), 3):
+                for x in range(0, image.width(), 3):
+                    r, g, b, _a = image.pixelColor(x, y).getRgb()
+                    if r > 180 and r > g * 2 and r > b * 2:
+                        reds += 1
+            return reds
+
+        trough = render(20.0)   # ten full periods after the delay: alpha 0
+        peak = render(20.5)     # half a period later: alpha 0.9
+
+        self.assertLess(trough, 20, f"the sky was already red ({trough} px)")
+        self.assertGreater(
+            peak, trough * 10 + 500,
+            f"the strobe never reached the screen ({trough} -> {peak} px)",
+        )
+
+        # And it must stop when the alert is dismissed, not merely dim: the
+        # shard reassembles, and _shatter_t is no longer what drives the frame.
+        shard.set_alarm(False)
+        self.assertLess(render(20.5), 20, "the strobe outlived the alert")
 
     def test_sky_still_draws_after_the_pieces_have_cleared(self):
         """paintGL returns early once the shard is gone. The sky must precede

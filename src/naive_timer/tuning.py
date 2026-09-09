@@ -153,6 +153,12 @@ _SHATTER_SLIDERS = [
     ("spark_flare", 0.0, 8.0),      # flare multiplier while the pieces fall
     ("spark_impact", 0.0, 12.0),    # the crack's own flash, x spark_intensity
     ("spark_hue", 0.0, 1.0),        # dispersion: hue scatter per glint
+    # The full-frame pulse, once the pieces are gone. strobe_peak 0 is the
+    # off switch; the delay is measured from the break, not from the clear.
+    ("strobe_delay_s", 0.0, 60.0),
+    ("strobe_period_s", 0.2, 4.0),
+    ("strobe_peak", 0.0, 1.0),
+    ("strobe_shape", 1.0, 6.0),
 ]
 
 # Frame-wide, not shard-wide: these run over the composited scene, after the

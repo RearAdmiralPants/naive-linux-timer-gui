@@ -129,6 +129,7 @@ _POST_STAGES = {
     "post_composite": (
         "uScene", "uBloom", "uFlare",
         "uExposure", "uBloomStrength", "uFlareStrength", "uRolloff",
+        "uStrobeColor", "uStrobe",
     ),
 }
 
@@ -472,6 +473,29 @@ class ShardParams:
     # scattered spark some luminance. That is the honest direction: a prism
     # splits the energy it receives, it does not add any.
     spark_hue: float = 0.45
+
+    # The strobe. Once the pieces have tumbled out of frame there is nothing
+    # left on screen but stars, and an alarm that is still ringing has nothing
+    # to show for it -- so the whole frame pulses in the light's colour until
+    # the user deals with it. Deliberately the least clever thing in this file:
+    # a flat wash applied after the tonemap, where the opacity means what it
+    # says.
+    #
+    # strobe_delay_s is measured from the break, not from the pieces clearing:
+    # a fixed, predictable beat, rather than one that moves with gravity and
+    # the camera. strobe_shape is the exponent on the approach -- 2.0 is the
+    # parabola this was asked for, and it is what keeps most of each cycle down
+    # near zero (below half peak for 71% of it) so the thing reads as a pulse
+    # rather than as a flickering light. Higher is sharper and darker; 1.0 is a
+    # plain triangle wave and looks like a fade.
+    #
+    # 0 delay is not an off switch (that is strobe_peak = 0), it just starts
+    # the pulse at the break -- which is worth a look, but it fights the glints
+    # for the first few seconds and washes out the crack.
+    strobe_delay_s: float = 10.0
+    strobe_period_s: float = 1.1
+    strobe_peak: float = 0.9
+    strobe_shape: float = 2.0
 
     # Front-face curvature. Unlike everything above, these two rebuild the
     # vertex buffer rather than setting a uniform -- see _geometry_dirty.
@@ -1462,6 +1486,28 @@ def _spark_tint(index: int, hue: float) -> tuple:
     return (keep + hue * r, keep + hue * g, keep + hue * b)
 
 
+def _strobe_alpha(shatter_t: float, params) -> float:
+    """Opacity of the full-frame pulse ``shatter_t`` seconds after the break.
+
+    Zero until ``strobe_delay_s``, then a repeating parabolic approach to
+    ``strobe_peak``: minimum at the middle of each cycle, peak at its edges, so
+    each pulse builds and then falls away from a brief cusp. With the default
+    exponent of 2 it sits below half peak for 71% of every cycle, which is what
+    makes it read as a pulse in the dark rather than as a light left flickering.
+
+    The phase is offset half a cycle so the first pulse *builds*. Starting at
+    the cusp would open with a full-strength flash on the frame the delay
+    expires, which is indistinguishable from a bug.
+    """
+    if params.strobe_peak <= 0.0 or params.strobe_period_s <= 0.0:
+        return 0.0
+    since = shatter_t - params.strobe_delay_s
+    if since < 0.0:
+        return 0.0
+    phase = (since / params.strobe_period_s + 0.5) % 1.0
+    return params.strobe_peak * abs(2.0 * phase - 1.0) ** max(params.strobe_shape, 0.0)
+
+
 def _spark_placement(index: int, origin: tuple, eye: tuple,
                      distance: float) -> tuple:
     """A point ``distance`` from ``origin``, in the cone facing ``eye``.
@@ -1836,6 +1882,7 @@ class ShardWidget(QOpenGLWidget):
         self.params = params or ShardParams()
 
         self._alarm = False
+        self._strobing = False
         self._shatter_t = 0.0  # seconds since the break; 0 while intact
         self._spin = 0.0
         self._spin_at_break = 0.0
@@ -1894,7 +1941,16 @@ class ShardWidget(QOpenGLWidget):
             self._text = text
             self._text_dirty = True
 
-    def set_alarm(self, active: bool) -> None:
+    def set_alarm(self, active: bool, *, strobe: bool = True) -> None:
+        """Break the shard (or reassemble it).
+
+        ``strobe`` is what separates an *alert* from a *transition*. The Timer's
+        alarm goes on ringing until someone deals with it, so once the pieces
+        are gone the frame pulses to say so; the Stopwatch's Reset is just the
+        shard being cleared out of the way and reassembling at zero, and
+        nothing is waiting on the user. Only the caller knows which it is.
+        """
+        self._strobing = active and strobe
         if active == self._alarm:
             return
         self._alarm = active
@@ -2868,6 +2924,15 @@ class ShardWidget(QOpenGLWidget):
             "post_composite", "uFlareStrength", flare, is_float=True
         )
         self._post_set("post_composite", "uRolloff", p.rolloff, is_float=True)
+
+        # The strobe outlives the pieces: _shatter_t keeps running after
+        # _draw_shard has stopped rasterising anything, which is the whole
+        # point of it -- an empty starfield with an alarm still going.
+        strobe = _strobe_alpha(self._shatter_t, p) if self._strobing else 0.0
+        self._post_set(
+            "post_composite", "uStrobeColor", QVector3D(*p.light_color)
+        )
+        self._post_set("post_composite", "uStrobe", strobe, is_float=True)
         fns.glDrawArrays(_GL_TRIANGLES, 0, 3)
 
         program.release()
