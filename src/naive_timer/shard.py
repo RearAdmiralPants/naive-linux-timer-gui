@@ -18,6 +18,7 @@ Launch with ``NAIVE_TIMER_TUNE=1`` to get live sliders for every uniform.
 from __future__ import annotations
 
 import array
+import colorsys
 import math
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -419,8 +420,8 @@ class ShardParams:
     # hot facet clears the bright-pass by itself and brings its own glare and
     # flare with it.
     #
-    # spark_rate is flashes per second across the whole break (0 disables
-    # them). spark_intensity multiplies light_intensity, so a preset that is
+    # spark_rate is flashes per second across the whole break (0 disables the
+    # scatter, leaving only the impact flash below). spark_intensity multiplies light_intensity, so a preset that is
     # already bright gets glints in proportion rather than glints that vanish
     # into it. spark_life is how long one flash lasts, before the per-spark
     # variation either side of it. spark_offset is in multiples of the host
@@ -443,6 +444,34 @@ class ShardParams:
     # numerals -- but once the shard is in pieces there is no readout left to
     # protect, which is exactly the trade the flare comment below describes.
     spark_flare: float = 2.5
+    # The crack. sound.py's shatter clip opens on an impact transient -- a
+    # broadband noise burst, high-passed to read as a sharp crack -- and
+    # _begin_alert plays it on the same line that breaks the shard, so the two
+    # are simultaneous by construction. This is its counterpart in light: one
+    # much brighter light at the moment of the break, instant-on and decaying
+    # like the sound does, rather than the shatter's first glint arriving
+    # whenever its slot happens to come up. A multiple of spark_intensity;
+    # 0 leaves the break silent-looking.
+    spark_impact: float = 3.5
+    # Dispersion. Glass splits what it reflects, so a glint is rarely quite the
+    # colour of the lamp. Each spark's radiance is pulled a fraction of the way
+    # toward a random fully-saturated hue: 0 is the lamp's own colour, 1 is a
+    # different pure hue every flash. The hot core still tonemaps to white --
+    # the per-channel curve saturates the strongest channel first -- so what
+    # this actually tints is the falloff and the glare halo around it, which is
+    # where dispersion shows in the real thing too. The impact flash is exempt:
+    # that is the pane cracking, not a facet splitting a beam.
+    #
+    # The default is as high as it is because the effect is much subtler than
+    # the number suggests -- measured on the mean saturation of the lit,
+    # unclipped pixels, 0.3 moved it from 0.320 to 0.341 and 0.75 to 0.378.
+    # The glass's own colour is most of what a lit facet is, and the hot core
+    # is white whatever colour reached it.
+    #
+    # A tint only ever takes channels *down*, which does cost a strongly
+    # scattered spark some luminance. That is the honest direction: a prism
+    # splits the energy it receives, it does not add any.
+    spark_hue: float = 0.45
 
     # Front-face curvature. Unlike everything above, these two rebuild the
     # vertex buffer rather than setting a uniform -- see _geometry_dirty.
@@ -1370,6 +1399,13 @@ _SPARK_LIFE_MAX = 1.45
 # Fraction of a spark's life spent brightening. Short: a glint snaps on and
 # falls away, where a symmetric fade reads as a lamp on a dimmer.
 _SPARK_ATTACK = 0.22
+# The impact flash: how long the crack's own light lasts, and how much of that
+# it spends coming on. Both are read off sound.py's shatter clip rather than
+# picked to taste -- a 1.5 ms raised-cosine open, a 50 ms noise burst, then a
+# body that decays over a few hundred milliseconds. The eye gets the same
+# shape: on within a frame, gone by the time the clatter thins.
+_SPARK_IMPACT_LIFE_S = 0.30
+_SPARK_IMPACT_ATTACK = 0.05
 # Angle off the camera direction, in degrees, that a spark may be placed at.
 # Zero would put every light exactly behind the viewer's eye, which flattens
 # the piece into a flash-lit snapshot; past ~70 degrees the highlight it throws
@@ -1389,6 +1425,75 @@ def _spark_envelope(u: float) -> float:
         return 0.0
     e = u / _SPARK_ATTACK if u < _SPARK_ATTACK else (1.0 - u) / (1.0 - _SPARK_ATTACK)
     return e * e * (3.0 - 2.0 * e)
+
+
+def _spark_impact_envelope(u: float) -> float:
+    """Brightness of the crack's flash ``u`` of the way through its life.
+
+    Not the same shape as a glint's. A glint swells and falls; an impact is a
+    step and a decay, which is what sound.py's transient does and what a
+    fracture actually is. The attack is a raised cosine like the audio's (a
+    hard step is a click in sound and a pop in vision), the decay is
+    exponential, and it is normalised to reach exactly zero at the end so
+    nothing has to be faded out afterwards.
+    """
+    if u <= 0.0 or u >= 1.0:
+        return 0.0
+    if u < _SPARK_IMPACT_ATTACK:
+        return 0.5 * (1.0 - math.cos(math.pi * u / _SPARK_IMPACT_ATTACK))
+    x = (u - _SPARK_IMPACT_ATTACK) / (1.0 - _SPARK_IMPACT_ATTACK)
+    tail = math.exp(-5.0)
+    return (math.exp(-5.0 * x) - tail) / (1.0 - tail)
+
+
+def _spark_tint(index: int, hue: float) -> tuple:
+    """Per-channel multipliers pulling a spark toward a random pure hue.
+
+    Rotating the lamp's hue would be the obvious thing and does not work: most
+    presets light with something near white, which has no hue to rotate. What
+    dispersion does to a white reflection is *add* colour, so this mixes toward
+    a fully saturated one instead. Channels only ever come down, never up, so a
+    tinted spark cannot end up brighter than the lamp it came from.
+    """
+    if hue <= 0.0:
+        return (1.0, 1.0, 1.0)
+    r, g, b = colorsys.hsv_to_rgb(_hash01(index, _SPARK_SALT + 6), 1.0, 1.0)
+    keep = 1.0 - hue
+    return (keep + hue * r, keep + hue * g, keep + hue * b)
+
+
+def _spark_placement(index: int, origin: tuple, eye: tuple,
+                     distance: float) -> tuple:
+    """A point ``distance`` from ``origin``, in the cone facing ``eye``.
+
+    Shared by the per-wedge glints and by the impact flash, which differ in
+    what they are placed around and in nothing else.
+    """
+    fx, fy, fz = eye[0] - origin[0], eye[1] - origin[1], eye[2] - origin[2]
+    flen = math.sqrt(fx * fx + fy * fy + fz * fz) or 1.0
+    fx, fy, fz = fx / flen, fy / flen, fz / flen
+
+    # Any vector not parallel to f gives a usable basis; pick the world axis f
+    # leans on least so the cross product never degenerates.
+    if abs(fy) < 0.9:
+        ux, uy, uz = 0.0, 1.0, 0.0
+    else:
+        ux, uy, uz = 0.0, 0.0, 1.0
+    rx, ry, rz = fy * uz - fz * uy, fz * ux - fx * uz, fx * uy - fy * ux
+    rlen = math.sqrt(rx * rx + ry * ry + rz * rz) or 1.0
+    rx, ry, rz = rx / rlen, ry / rlen, rz / rlen
+    bx, by, bz = fy * rz - fz * ry, fz * rx - fx * rz, fx * ry - fy * rx
+
+    theta = math.radians(_SPARK_CONE_MIN_DEG + (
+        _SPARK_CONE_MAX_DEG - _SPARK_CONE_MIN_DEG) * _hash01(index, _SPARK_SALT + 3))
+    phi = 2.0 * math.pi * _hash01(index, _SPARK_SALT + 4)
+    ct, st = math.cos(theta), math.sin(theta)
+    cp, sp = math.cos(phi), math.sin(phi)
+    return (
+        origin[0] + (fx * ct + (rx * cp + bx * sp) * st) * distance,
+        origin[1] + (fy * ct + (ry * cp + by * sp) * st) * distance,
+        origin[2] + (fz * ct + (rz * cp + bz * sp) * st) * distance,
+    )
 
 
 def _spark_lights(shatter_t: float, bounds: list, spin: float, eye: tuple,
@@ -1413,23 +1518,27 @@ def _spark_lights(shatter_t: float, bounds: list, spin: float, eye: tuple,
     just as well, but half of those highlights fire away from the camera and
     are never seen -- which is the accident this exists to stop relying on.
     """
-    rate = params.spark_rate
-    if shatter_t <= 0.0 or rate <= 0.0 or not bounds:
+    if shatter_t <= 0.0 or not bounds:
         return []
-    life = max(params.spark_life, 1e-4)
     energy = params.spark_intensity * params.light_intensity
     if energy <= 0.0:
         return []
 
-    first = int(math.floor((shatter_t - life * _SPARK_LIFE_MAX) * rate))
-    last = int(math.floor(shatter_t * rate))
+    rate = params.spark_rate
+    life = max(params.spark_life, 1e-4)
     gy_half = 0.5 * params.gravity * _GRAVITY_1G
     cs, sn = math.cos(spin), math.sin(spin)
     t = shatter_t
     tt = t * t
 
+    # spark_rate and spark_impact are separate switches: the glints are the
+    # scatter through the fall, the impact flash is the crack. Turning the
+    # scatter off must leave the crack, or the two could never be judged apart.
+    first = int(math.floor((shatter_t - life * _SPARK_LIFE_MAX) * rate))
+    last = int(math.floor(shatter_t * rate))
+
     live = []
-    for k in range(max(first, 0), last + 1):
+    for k in range(max(first, 0), last + 1 if rate > 0.0 else 0):
         birth = (k + _hash01(k, _SPARK_SALT)) / rate
         span = life * (_SPARK_LIFE_MIN + (_SPARK_LIFE_MAX - _SPARK_LIFE_MIN)
                        * _hash01(k, _SPARK_SALT + 1))
@@ -1440,41 +1549,33 @@ def _spark_lights(shatter_t: float, bounds: list, spin: float, eye: tuple,
         centre, vel, radius = bounds[int(_hash01(k, _SPARK_SALT + 2)
                                          * len(bounds)) % len(bounds)]
         # Frozen idle-spin about Y, then the piece's own drift and fall.
-        px = (cs * centre[0] + sn * centre[2]) + (cs * vel[0] + sn * vel[2]) * t
-        py = centre[1] + vel[1] * t - gy_half * tt
-        pz = (-sn * centre[0] + cs * centre[2]) + (-sn * vel[0] + cs * vel[2]) * t
-
-        fx, fy, fz = eye[0] - px, eye[1] - py, eye[2] - pz
-        flen = math.sqrt(fx * fx + fy * fy + fz * fz) or 1.0
-        fx, fy, fz = fx / flen, fy / flen, fz / flen
-
-        # Any vector not parallel to f gives a usable basis; pick the world
-        # axis f leans on least so the cross product never degenerates.
-        if abs(fy) < 0.9:
-            ux, uy, uz = 0.0, 1.0, 0.0
-        else:
-            ux, uy, uz = 0.0, 0.0, 1.0
-        rx, ry, rz = fy * uz - fz * uy, fz * ux - fx * uz, fx * uy - fy * ux
-        rlen = math.sqrt(rx * rx + ry * ry + rz * rz) or 1.0
-        rx, ry, rz = rx / rlen, ry / rlen, rz / rlen
-        bx, by, bz = fy * rz - fz * ry, fz * rx - fx * rz, fx * ry - fy * rx
-
-        theta = math.radians(_SPARK_CONE_MIN_DEG + (
-            _SPARK_CONE_MAX_DEG - _SPARK_CONE_MIN_DEG)
-            * _hash01(k, _SPARK_SALT + 3))
-        phi = 2.0 * math.pi * _hash01(k, _SPARK_SALT + 4)
-        ct, st = math.cos(theta), math.sin(theta)
-        cp, sp = math.cos(phi), math.sin(phi)
-        dx = fx * ct + (rx * cp + bx * sp) * st
-        dy = fy * ct + (ry * cp + by * sp) * st
-        dz = fz * ct + (rz * cp + bz * sp) * st
-
-        reach = radius * params.spark_offset
-        pos = (px + dx * reach, py + dy * reach, pz + dz * reach)
+        host = (
+            (cs * centre[0] + sn * centre[2]) + (cs * vel[0] + sn * vel[2]) * t,
+            centre[1] + vel[1] * t - gy_half * tt,
+            (-sn * centre[0] + cs * centre[2]) + (-sn * vel[0] + cs * vel[2]) * t,
+        )
+        pos = _spark_placement(k, host, eye, radius * params.spark_offset)
         # Vary the peak as well as the timing: a field of identical flashes
         # reads as a machine blinking, not as glass turning through a beam.
         gain = env * energy * (0.55 + 0.9 * _hash01(k, _SPARK_SALT + 5))
-        live.append((gain, pos))
+        live.append((gain, pos, _spark_tint(k, params.spark_hue)))
+
+    # The crack. One flash at the break, far brighter than a glint and shaped
+    # like the sound rather than like the others: it is the same event as the
+    # impact transient at the head of the shatter WAV, and _begin_alert fires
+    # both on the same line. Placed around the shard's own centre, since at
+    # this point in the break the pieces are all still there. Untinted --
+    # dispersion belongs to the facets, not to the fracture.
+    if params.spark_impact > 0.0 and t < _SPARK_IMPACT_LIFE_S:
+        env = _spark_impact_envelope(t / _SPARK_IMPACT_LIFE_S)
+        if env > 0.0:
+            spread = max(radius for _c, _v, radius in bounds)
+            live.append((
+                env * energy * params.spark_impact,
+                _spark_placement(-1, (0.0, 0.0, 0.0), eye,
+                                 spread * params.spark_offset),
+                (1.0, 1.0, 1.0),
+            ))
 
     if len(live) > _SPARK_MAX:
         live.sort(key=lambda item: item[0], reverse=True)
@@ -1482,8 +1583,10 @@ def _spark_lights(shatter_t: float, bounds: list, spin: float, eye: tuple,
 
     colour = params.light_color
     return [
-        (pos, (colour[0] * gain, colour[1] * gain, colour[2] * gain))
-        for gain, pos in live
+        (pos, (colour[0] * tint[0] * gain,
+               colour[1] * tint[1] * gain,
+               colour[2] * tint[2] * gain))
+        for gain, pos, tint in live
     ]
 
 

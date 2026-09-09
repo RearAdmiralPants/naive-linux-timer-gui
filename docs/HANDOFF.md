@@ -216,6 +216,24 @@ Notes for whoever touches the shatter next:
   - `spark_flare` multiplies `flare` while the pieces are falling. The idle
     flare is deliberately timid to keep ghosts off the numerals; once the shard
     is in pieces there is no readout left to protect.
+  - **The crack has its own light** (`spark_impact`), and it is not a glint: a
+    step and an exponential decay rather than a swell, placed around the
+    shard's centre rather than a wedge's, and untinted. Its shape and its
+    0.30 s life are read off `sound.py`'s shatter clip — a 1.5 ms raised-cosine
+    open, a 50 ms noise burst, a body decaying over a few hundred ms — because
+    `_begin_alert` plays that clip on the same line that breaks the shard, so
+    the two are the same event. `spark_rate` and `spark_impact` are separate
+    switches for exactly this reason: the scatter can be turned off and the
+    crack still fires.
+  - **`spark_hue` is dispersion**, and it mixes toward a random saturated hue
+    rather than rotating the lamp's. Rotating was tried first and does nothing:
+    most presets light with something near white, which has no hue to rotate,
+    and what dispersion does to a white reflection is *add* colour. It is
+    subtler than the number looks — mean saturation over the lit, unclipped
+    pixels goes 0.320 (off) → 0.341 (0.3) → 0.378 (0.75) — because the glass's
+    own colour is most of a lit facet and the hot core is white whatever
+    reached it. Tints only take channels down: a prism splits the energy it
+    gets, it does not add any.
   - The shader loop is bounded by `_SPARK_MAX` / `MAX_SPARKS` — **the two must
     agree**. When more sparks are alive than that, the brightest survive.
     While the shard is intact `uSparkCount` is 0, so this costs nothing until

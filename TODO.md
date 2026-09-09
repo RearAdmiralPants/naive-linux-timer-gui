@@ -20,9 +20,15 @@ On shatter:
     see; a light inside a closed solid only reaches the interior surfaces. Six
     `spark_*` sliders under Shatter, `spark_rate = 0` is the off switch. Notes
     and the measurements in docs/HANDOFF.md.
-  - Still open, if it wants another pass: the glints do not yet key off the
-    *sound* (no flash on the impact transient), and every spark is the light's
-    own colour -- a little hue scatter might sell the dispersion.
+  - [x] Keyed to the sound: `spark_impact` is one much brighter flash at the
+    break, shaped like the shatter clip's impact transient (step, then decay,
+    0.3 s) rather than like a glint. `_begin_alert` plays the clip on the same
+    line that breaks the shard, so they are the same event by construction --
+    which also means anything that delays the audio (a cold Bluetooth sink)
+    now has a visible reference to be late against.
+  - [x] `spark_hue`: each glint is pulled toward a random saturated hue, the
+    impact flash is not. Subtler than it sounds -- see HANDOFF for the
+    saturation numbers and why rotating the lamp's hue does not work.
 - Warm up the sound ~1s before shattering so e.g. bluetooth sinks don't miss the first 1/4s
 
 

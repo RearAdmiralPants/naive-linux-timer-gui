@@ -151,6 +151,8 @@ _SHATTER_SLIDERS = [
     ("spark_focus", 0.2, 8.0),      # x spec_power for the glint's lobe
     ("spark_reach", 0.05, 3.0),
     ("spark_flare", 0.0, 8.0),      # flare multiplier while the pieces fall
+    ("spark_impact", 0.0, 12.0),    # the crack's own flash, x spark_intensity
+    ("spark_hue", 0.0, 1.0),        # dispersion: hue scatter per glint
 ]
 
 # Frame-wide, not shard-wide: these run over the composited scene, after the

@@ -749,7 +749,10 @@ class ShatterGlintTest(unittest.TestCase):
 
         from naive_timer.shard import ShardParams, _spark_lights
 
-        params = ShardParams(spark_rate=60.0)
+        # No impact flash: that one is placed around the shard's centre rather
+        # than around a wedge, which is exactly what this test forbids of a
+        # glint. It is covered by test_the_crack_gets_its_own_flash.
+        params = ShardParams(spark_rate=60.0, spark_impact=0.0)
         eye = (0.0, 0.0, 3.2)
         # One wedge climbing steadily along +y, well clear of the offset
         # sphere's own radius by the time we sample it.
@@ -763,6 +766,133 @@ class ShatterGlintTest(unittest.TestCase):
                     params.spark_offset * 0.2 + 1e-6,
                     "spark did not travel with its wedge",
                 )
+
+
+class ShatterImpactTest(unittest.TestCase):
+    """The crack: one flash at the break, matched to the shatter clip's attack."""
+
+    def _bounds(self):
+        return [((0.0, 0.0, 0.0), (0.0, 0.0, 0.0), 1.0)]
+
+    def test_the_crack_gets_its_own_flash(self):
+        """Something bright must happen *at* the break, not whenever a glint slot
+        next comes up -- `sound.py`'s impact transient plays on the same line
+        that breaks the shard, and this is its counterpart in light."""
+        from naive_timer.shard import (
+            _SPARK_IMPACT_LIFE_S, ShardParams, _spark_lights,
+        )
+
+        # Glints off, so whatever is left is the impact flash alone.
+        params = ShardParams(spark_rate=0.0, gravity=0.0)
+        bounds = self._bounds()
+        eye = (0.0, 0.0, 3.2)
+
+        at_break = _spark_lights(0.01, bounds, 0.0, eye, params)
+        self.assertEqual(len(at_break), 1, "the break itself threw no light")
+
+        later = _spark_lights(_SPARK_IMPACT_LIFE_S + 0.01, bounds, 0.0, eye, params)
+        self.assertEqual(later, [], "the crack's flash outlived the crack")
+
+        # And it has to out-shout a glint, or it is not an impact.
+        glint = ShardParams(spark_impact=0.0, gravity=0.0)
+        peaks = [
+            max(radiance)
+            for step in range(300)
+            for _pos, radiance in _spark_lights(
+                0.05 + step * 0.01, bounds, 0.0, eye, glint)
+        ]
+        self.assertGreater(
+            max(max(r) for _p, r in at_break), max(peaks),
+            "the impact flash is no brighter than an ordinary glint",
+        )
+
+    def test_the_impact_is_a_step_and_a_decay(self):
+        """A glint swells and falls; a fracture does not swell."""
+        from naive_timer.shard import _SPARK_IMPACT_ATTACK, _spark_impact_envelope
+
+        self.assertEqual(_spark_impact_envelope(0.0), 0.0)
+        self.assertEqual(_spark_impact_envelope(1.0), 0.0)
+        self.assertAlmostEqual(_spark_impact_envelope(_SPARK_IMPACT_ATTACK), 1.0)
+
+        # Full brightness inside the first twentieth of its life, and falling
+        # monotonically from there.
+        self.assertLess(_SPARK_IMPACT_ATTACK, 0.1)
+        previous = 1.0
+        for step in range(1, 40):
+            value = _spark_impact_envelope(_SPARK_IMPACT_ATTACK + step * 0.02)
+            self.assertLessEqual(value, previous + 1e-9, "the decay is not monotone")
+            previous = value
+
+    def test_glints_scatter_in_hue_but_the_crack_does_not(self):
+        """Dispersion, and the one light it must not be applied to.
+
+        Also pins the direction: a tint may only take a channel *down*. Pulling
+        one up would make a tinted spark brighter than the lamp it came from,
+        which is not what splitting a beam does.
+        """
+        from naive_timer.shard import ShardParams, _spark_lights
+
+        bounds = self._bounds()
+        eye = (0.0, 0.0, 3.2)
+
+        def ratios(params, first, count):
+            out = []
+            for step in range(count):
+                for _pos, radiance in _spark_lights(
+                    first + step * 0.01, bounds, 0.0, eye, params
+                ):
+                    peak = max(radiance)
+                    if peak > 0.0:
+                        out.append(tuple(round(c / peak, 3) for c in radiance))
+            return out
+
+        lamp = (0.9, 0.9, 0.6)
+        plain = set(ratios(
+            ShardParams(light_color=lamp, spark_hue=0.0, spark_impact=0.0),
+            0.05, 300,
+        ))
+        self.assertEqual(
+            len(plain), 1, "with no scatter every glint is the lamp's colour"
+        )
+
+        scattered = ratios(
+            ShardParams(light_color=lamp, spark_hue=0.5, spark_impact=0.0),
+            0.05, 300,
+        )
+        self.assertGreater(
+            len(set(scattered)), 10, "hue scatter produced one colour, or none"
+        )
+        # Direction, measured on absolute radiance rather than on the ratios
+        # above: normalising hides it, since dividing by the peak *raises* the
+        # channel the tint happened to favour.
+        untinted = ShardParams(light_color=lamp, spark_hue=0.0, spark_impact=0.0)
+        tinted = ShardParams(light_color=lamp, spark_hue=0.5, spark_impact=0.0)
+        for step in range(300):
+            when = 0.05 + step * 0.01
+            before = _spark_lights(when, bounds, 0.0, eye, untinted)
+            after = _spark_lights(when, bounds, 0.0, eye, tinted)
+            self.assertEqual(
+                len(before), len(after), "tinting changed which sparks are alive"
+            )
+            for (_p0, plain_rgb), (_p1, tinted_rgb) in zip(before, after):
+                for channel, base in zip(tinted_rgb, plain_rgb):
+                    self.assertLessEqual(
+                        channel, base + 1e-9, "a tint brightened a channel"
+                    )
+
+        # The crack keeps the lamp's colour however wide the scatter is set.
+        crack = _spark_lights(
+            0.01, bounds, 0.0, eye,
+            ShardParams(light_color=lamp, spark_hue=1.0, spark_rate=0.0),
+        )
+        self.assertEqual(len(crack), 1)
+        _pos, radiance = crack[0]
+        peak = max(radiance)
+        self.assertEqual(
+            tuple(round(c / peak, 3) for c in radiance),
+            tuple(round(c / max(lamp), 3) for c in lamp),
+            "the impact flash was tinted",
+        )
 
 
 class CurvedFrontTest(unittest.TestCase):
@@ -1897,8 +2027,10 @@ class GlTest(unittest.TestCase):
             )
 
         params.spark_rate = 0.0
+        params.spark_impact = 0.0   # the crack is its own light; see ShatterImpactTest
         dark = hot()
         params.spark_rate = ShardParams.spark_rate
+        params.spark_impact = ShardParams.spark_impact
         lit = hot()
 
         self.assertGreater(

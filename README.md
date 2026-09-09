@@ -208,7 +208,10 @@ break: point lights that live a fifth of a second each, placed beside the
 falling pieces and facing the viewer, hot enough to bring their own glare and
 flare with them. `spark_rate` is flashes per second and 0 turns them off;
 `spark_focus` is the one to reach for first if a flash covers a whole piece
-instead of picking out a facet.
+instead of picking out a facet. `spark_impact` is separate: one much brighter
+flash at the break itself, shaped like the attack of the shatter sound, which
+is played on the same line that breaks the shard. `spark_hue` scatters each
+glint's colour a little, since glass splits what it reflects.
 
 Sliders ignore the mouse wheel unless you click one first — otherwise scrolling
 the panel would rewrite every value the pointer crossed.
