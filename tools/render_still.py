@@ -40,6 +40,9 @@ def main() -> int:
     ap.add_argument("--spin", default="0",
                     help="comma-separated idle-spin angles, one per --angles entry")
     ap.add_argument("--size", default="1280x960")
+    ap.add_argument("--shatter", default="",
+                    help="comma-separated shatter times; renders the break "
+                         "instead of the intact shard, one file per time")
     args = ap.parse_args()
 
     QCoreApplication.setAttribute(Qt.ApplicationAttribute.AA_ShareOpenGLContexts)
@@ -66,16 +69,36 @@ def main() -> int:
     stem, ext = os.path.splitext(args.out)
     angles = [float(a) for a in args.angles.split(",")]
     spins = [float(a) for a in args.spin.split(",")]
-    for i, elapsed in enumerate(angles):
+
+    # --shatter samples the break at fixed times instead of sweeping the sway.
+    # The pieces' pose, the early-clear check and the glints are all pure
+    # functions of _shatter_t, so setting it directly reproduces exactly the
+    # frame the app would have drawn that far into the alert.
+    if args.shatter:
+        shatters = [float(v) for v in args.shatter.split(",")]
+        widget.set_alarm(True)
+    else:
+        shatters = [None]
+
+    frames = [(e, s) for s in shatters for e in angles]
+    for i, (elapsed, shatter) in enumerate(frames):
         widget._elapsed = elapsed
-        widget._spin = spins[i] if i < len(spins) else spins[-1]
+        widget._spin = spins[i % len(spins)]
+        if shatter is not None:
+            widget._spin_at_break = widget._spin
+            widget._shatter_t = shatter
+            widget._next_clear_check = 0.0
+            widget._refresh_early_clear()
         widget.update()
         app.processEvents()
         widget.repaint()
         image = widget.grabFramebuffer()
-        path = args.out if len(angles) == 1 else f"{stem}-{i}{ext}"
+        path = args.out if len(frames) == 1 else f"{stem}-{i}{ext}"
         image.save(path)
-        print(f"wrote {path}  (elapsed={elapsed})")
+        label = f"elapsed={elapsed}"
+        if shatter is not None:
+            label += f" shatter={shatter}"
+        print(f"wrote {path}  ({label})")
     return 0
 
 

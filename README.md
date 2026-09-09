@@ -20,9 +20,11 @@ and verified without a display; the Qt layer is a thin view on top.
 - **Alarm at** mode: count down to a clock time — `02:54`, `14:00`, `6:30pm`
   (rolls to tomorrow if the time has already passed today)
 - Or start a countdown straight from the shell: `naive-timer --timer 30m`
-- On reaching zero: the shard shatters, its pieces tumbling away under gravity,
-  plus a gentle chime that loops quietly for ~2 minutes (configurable) or until
-  you hit **Dismiss**
+- On reaching zero: the shard shatters, its pieces tumbling away under gravity
+  and flashing as they fall — transient lights are spawned beside them, in the
+  hemisphere you are watching from, so the glass catches the light instead of
+  waiting to be lucky — plus a gentle chime that loops quietly for ~2 minutes
+  (configurable) or until you hit **Dismiss**
 - Both the chime and the shatter are synthesized at runtime (no binary asset);
   point the alert at your own WAV to customize
 
@@ -126,7 +128,7 @@ naive-timer --timer 30m                       # 30 minutes
 naive-timer --timer 1h30m                     # 1.5 hours
 naive-timer --timer 25:00                     # 25 minutes (mm:ss)
 naive-timer --timer 6:30pm                    # alarm at 6:30 PM
-naive-timer --timer 10m --json green-nebula.json   # timer + custom look
+naive-timer --timer 10m --json json/green-nebula.json  # timer + custom look
 ```
 
 The app opens on the Timer tab with the countdown already running, as though the
@@ -201,6 +203,13 @@ The lens flare needs no switch of its own: it is built from the same
 brighter-than-white buffer as the glare, so it fades in by itself as the
 highlights get hot enough to clear `bloom_threshold` and `flare_threshold`.
 
+The `spark_*` group under **Shatter** is the same machinery pointed at the
+break: point lights that live a fifth of a second each, placed beside the
+falling pieces and facing the viewer, hot enough to bring their own glare and
+flare with them. `spark_rate` is flashes per second and 0 turns them off;
+`spark_focus` is the one to reach for first if a flash covers a whole piece
+instead of picking out a facet.
+
 Sliders ignore the mouse wheel unless you click one first — otherwise scrolling
 the panel would rewrite every value the pointer crossed.
 
@@ -208,9 +217,9 @@ A look saved from that panel is just a JSON file, and `--json` loads one at
 startup — the shard wears it from the first frame:
 
 ```bash
-./launch.sh --json green-nebula.json          # load a saved look
+./launch.sh --json json/green-nebula.json     # load a saved look
 ./launch.sh --no-panel                         # tuning env set, but no panel
-NAIVE_TIMER_TUNE=1 ./launch.sh --json green-nebula.json  # load it, then tweak
+NAIVE_TIMER_TUNE=1 ./launch.sh --json json/green-nebula.json  # load it, then tweak
 ```
 
 `--json` only loads params; it no longer touches the panel. The panel is

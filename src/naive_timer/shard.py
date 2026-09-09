@@ -406,6 +406,44 @@ class ShardParams:
     gravity: float = 1.0
     shatter_clear_s: float = 5.5
 
+    # Shatter glints. The break used to be announced by a red pulse over the
+    # whole shard; it is announced now by the pieces catching the light, which
+    # is what glass actually does when it falls past a lamp.
+    #
+    # Left to itself that only happens by luck -- a facet has to tumble through
+    # the one orientation that puts the half-vector between the lamp and the
+    # eye. These force it: transient point lights are spawned beside the
+    # wedges, in the hemisphere facing the camera, so the highlight they throw
+    # is one the viewer is positioned to see. Each fades in and out inside a
+    # couple of hundred milliseconds, and the HDR chain does the rest -- the
+    # hot facet clears the bright-pass by itself and brings its own glare and
+    # flare with it.
+    #
+    # spark_rate is flashes per second across the whole break (0 disables
+    # them). spark_intensity multiplies light_intensity, so a preset that is
+    # already bright gets glints in proportion rather than glints that vanish
+    # into it. spark_life is how long one flash lasts, before the per-spark
+    # variation either side of it. spark_offset is in multiples of the host
+    # wedge's own bounding radius: below 1 the light sits inside the glass and
+    # only the interior faces catch it, above 1 it hangs just off the piece.
+    # spark_focus multiplies spec_power for the glint's lobe -- the presets on
+    # disk run spec_power from 9 to 40, and at the low end a spark sharing the
+    # key light's exponent floods the whole face it lands on instead of
+    # picking out a facet. spark_reach is the distance at which the light has
+    # fallen to half strength -- keep it under a wedge's separation or every
+    # piece flashes at once and the effect reads as the whole field pulsing.
+    spark_rate: float = 9.0
+    spark_intensity: float = 14.0
+    spark_life: float = 0.22
+    spark_offset: float = 1.35
+    spark_focus: float = 2.5
+    spark_reach: float = 0.45
+    # Multiplier on `flare` while the pieces are falling. The idle default is
+    # deliberately timid because a strong flare washes ghosts across the
+    # numerals -- but once the shard is in pieces there is no readout left to
+    # protect, which is exactly the trade the flare comment below describes.
+    spark_flare: float = 2.5
+
     # Front-face curvature. Unlike everything above, these two rebuild the
     # vertex buffer rather than setting a uniform -- see _geometry_dirty.
     # front_subdiv is an integer level 0..5 (triangle count), front_bulge is
@@ -1313,6 +1351,142 @@ def _wedge_bounds(data: array.array) -> list:
     return bounds
 
 
+# Shatter glints -- see ShardParams.spark_* for what they are for.
+#
+# _SPARK_MAX is the size of the uniform arrays declared in shard.frag
+# (MAX_SPARKS there); the two must agree, and _spark_lights never returns more
+# than this many. When more are alive at once the brightest survive, which is
+# the right ones to keep: the ones being dropped are by definition the ones
+# nobody would have seen.
+_SPARK_MAX = 6
+# Salt block for the spark hashes. The rigid-body salts are 1..8, and reusing
+# one would tie a spark's placement to the tumble of the very piece it lights.
+_SPARK_SALT = 40
+# How far a spark's life is allowed to vary from spark_life, so no two flashes
+# last the same time. The upper bound is not cosmetic: _spark_lights uses it to
+# decide how far back to look for sparks that might still be alive.
+_SPARK_LIFE_MIN = 0.55
+_SPARK_LIFE_MAX = 1.45
+# Fraction of a spark's life spent brightening. Short: a glint snaps on and
+# falls away, where a symmetric fade reads as a lamp on a dimmer.
+_SPARK_ATTACK = 0.22
+# Angle off the camera direction, in degrees, that a spark may be placed at.
+# Zero would put every light exactly behind the viewer's eye, which flattens
+# the piece into a flash-lit snapshot; past ~70 degrees the highlight it throws
+# lands on facets that are turned too far away to be seen.
+_SPARK_CONE_MIN_DEG = 12.0
+_SPARK_CONE_MAX_DEG = 68.0
+
+
+def _spark_envelope(u: float) -> float:
+    """Brightness of a spark ``u`` of the way through its life, 0 at both ends.
+
+    A smoothstepped asymmetric triangle: fast up, slower down. Both ends reach
+    zero with zero slope, so a spark neither appears nor vanishes on a frame
+    boundary -- at 60 fps a hard-edged 0.2 s flash pops visibly.
+    """
+    if u <= 0.0 or u >= 1.0:
+        return 0.0
+    e = u / _SPARK_ATTACK if u < _SPARK_ATTACK else (1.0 - u) / (1.0 - _SPARK_ATTACK)
+    return e * e * (3.0 - 2.0 * e)
+
+
+def _spark_lights(shatter_t: float, bounds: list, spin: float, eye: tuple,
+                  params) -> list:
+    """The glint lights alive at ``shatter_t``: ``[((x,y,z), (r,g,b)), ...]``.
+
+    Positions are world space -- the model matrix is identity, so a wedge's
+    rest-frame centre needs only the frozen idle-spin and its own trajectory
+    applied, exactly as ``_all_pieces_offscreen`` does it. Colours are radiance:
+    light colour * intensity * envelope, folded together here so the shader has
+    no per-light animation to redo.
+
+    **Stateless by construction.** Spark k is born in its own 1/rate slot,
+    jittered inside it, so the whole sequence is a pure function of the break
+    clock: nothing accumulates, a reset needs no cleanup, and a given break
+    always sparkles the same way (the same reasoning as ``_hash01`` and the
+    tumble). Only the ks whose slot can still overlap ``shatter_t`` are tested,
+    so the cost does not grow with how long the shatter has been running.
+
+    ``eye`` is the camera position, and it matters: the light goes in the
+    hemisphere the viewer is on. A uniformly random direction lights the piece
+    just as well, but half of those highlights fire away from the camera and
+    are never seen -- which is the accident this exists to stop relying on.
+    """
+    rate = params.spark_rate
+    if shatter_t <= 0.0 or rate <= 0.0 or not bounds:
+        return []
+    life = max(params.spark_life, 1e-4)
+    energy = params.spark_intensity * params.light_intensity
+    if energy <= 0.0:
+        return []
+
+    first = int(math.floor((shatter_t - life * _SPARK_LIFE_MAX) * rate))
+    last = int(math.floor(shatter_t * rate))
+    gy_half = 0.5 * params.gravity * _GRAVITY_1G
+    cs, sn = math.cos(spin), math.sin(spin)
+    t = shatter_t
+    tt = t * t
+
+    live = []
+    for k in range(max(first, 0), last + 1):
+        birth = (k + _hash01(k, _SPARK_SALT)) / rate
+        span = life * (_SPARK_LIFE_MIN + (_SPARK_LIFE_MAX - _SPARK_LIFE_MIN)
+                       * _hash01(k, _SPARK_SALT + 1))
+        env = _spark_envelope((t - birth) / span)
+        if env <= 0.0:
+            continue
+
+        centre, vel, radius = bounds[int(_hash01(k, _SPARK_SALT + 2)
+                                         * len(bounds)) % len(bounds)]
+        # Frozen idle-spin about Y, then the piece's own drift and fall.
+        px = (cs * centre[0] + sn * centre[2]) + (cs * vel[0] + sn * vel[2]) * t
+        py = centre[1] + vel[1] * t - gy_half * tt
+        pz = (-sn * centre[0] + cs * centre[2]) + (-sn * vel[0] + cs * vel[2]) * t
+
+        fx, fy, fz = eye[0] - px, eye[1] - py, eye[2] - pz
+        flen = math.sqrt(fx * fx + fy * fy + fz * fz) or 1.0
+        fx, fy, fz = fx / flen, fy / flen, fz / flen
+
+        # Any vector not parallel to f gives a usable basis; pick the world
+        # axis f leans on least so the cross product never degenerates.
+        if abs(fy) < 0.9:
+            ux, uy, uz = 0.0, 1.0, 0.0
+        else:
+            ux, uy, uz = 0.0, 0.0, 1.0
+        rx, ry, rz = fy * uz - fz * uy, fz * ux - fx * uz, fx * uy - fy * ux
+        rlen = math.sqrt(rx * rx + ry * ry + rz * rz) or 1.0
+        rx, ry, rz = rx / rlen, ry / rlen, rz / rlen
+        bx, by, bz = fy * rz - fz * ry, fz * rx - fx * rz, fx * ry - fy * rx
+
+        theta = math.radians(_SPARK_CONE_MIN_DEG + (
+            _SPARK_CONE_MAX_DEG - _SPARK_CONE_MIN_DEG)
+            * _hash01(k, _SPARK_SALT + 3))
+        phi = 2.0 * math.pi * _hash01(k, _SPARK_SALT + 4)
+        ct, st = math.cos(theta), math.sin(theta)
+        cp, sp = math.cos(phi), math.sin(phi)
+        dx = fx * ct + (rx * cp + bx * sp) * st
+        dy = fy * ct + (ry * cp + by * sp) * st
+        dz = fz * ct + (rz * cp + bz * sp) * st
+
+        reach = radius * params.spark_offset
+        pos = (px + dx * reach, py + dy * reach, pz + dz * reach)
+        # Vary the peak as well as the timing: a field of identical flashes
+        # reads as a machine blinking, not as glass turning through a beam.
+        gain = env * energy * (0.55 + 0.9 * _hash01(k, _SPARK_SALT + 5))
+        live.append((gain, pos))
+
+    if len(live) > _SPARK_MAX:
+        live.sort(key=lambda item: item[0], reverse=True)
+        del live[_SPARK_MAX:]
+
+    colour = params.light_color
+    return [
+        (pos, (colour[0] * gain, colour[1] * gain, colour[2] * gain))
+        for gain, pos in live
+    ]
+
+
 def _build_geometry(subdiv: int = 0, bulge: float = 0.0, crystal: float = 0.0,
                     crystal_density: int = 0, crystal_vary: float = 0.5,
                     crystal_clear: float = 0.0, crystal_scale: float = 3.0,
@@ -1559,7 +1733,6 @@ class ShardWidget(QOpenGLWidget):
         self.params = params or ShardParams()
 
         self._alarm = False
-        self._alarm_phase = 0.0
         self._shatter_t = 0.0  # seconds since the break; 0 while intact
         self._spin = 0.0
         self._spin_at_break = 0.0
@@ -1632,7 +1805,6 @@ class ShardWidget(QOpenGLWidget):
         else:
             # Reset reassembles the shard.
             self._shatter_t = 0.0
-            self._alarm_phase = 0.0
             self._early_cleared = False
 
     def advance(self, dt: float) -> None:
@@ -1641,10 +1813,9 @@ class ShardWidget(QOpenGLWidget):
         self._elapsed += dt
 
         if self._alarm:
-            # The pieces tumble away and keep going; the red pulse continues
-            # long after they have left the frame, until the user resets.
+            # The pieces tumble away and keep going, glinting as they fall,
+            # until they leave the frame or the user resets.
             self._shatter_t += dt
-            self._alarm_phase += dt * 1.5 * 2.0 * math.pi
             self._refresh_early_clear()
         else:
             # One idle speed, whether or not the model is running. Speeding up
@@ -1879,7 +2050,14 @@ class ShardWidget(QOpenGLWidget):
                 "uGlassColor", "uTextColor",
                 "uSpecPower", "uSpecStrength", "uFresnel", "uGlow",
                 "uEtch", "uEtchDepth", "uBaseAlpha",
-                "uAlarm", "uShatterT",
+                "uShatterT",
+                "uSparkCount", "uSparkReach", "uSparkFocus",
+                # GLSL exposes each array element under its own indexed name,
+                # which is far less fiddly than PySide's array overloads and
+                # costs a dozen lookups once per program load.
+                *(f"uSpark{field}[{i}]"
+                  for field in ("Pos", "Radiance")
+                  for i in range(_SPARK_MAX)),
                 "uGravity",
                 "uSpin",
                 "uSpinAtBreak",
@@ -2243,6 +2421,12 @@ class ShardWidget(QOpenGLWidget):
         if location >= 0:
             self._program.setUniformValue1f(location, value)
 
+    def _set_int(self, name: str, value: int) -> None:
+        """Set an int uniform. The mirror of _set_float, for the same reason."""
+        location = self._uniforms.get(name, -1)
+        if location >= 0:
+            self._program.setUniformValue1i(location, value)
+
     def _upload_geometry(self) -> None:
         """(Re)allocate the VBO from _vertex_data.
 
@@ -2394,10 +2578,6 @@ class ShardWidget(QOpenGLWidget):
         proj = QMatrix4x4()
         proj.perspective(_FOV_DEGREES, aspect, 0.1, 100.0)
 
-        alarm = 0.0
-        if self._alarm:
-            alarm = 0.5 + 0.5 * math.sin(self._alarm_phase)
-
         program.bind()
         self._texture.bind(0)
         self._set("uText", 0)
@@ -2418,11 +2598,23 @@ class ShardWidget(QOpenGLWidget):
         self._set_float("uEtch", float(p.etch))
         self._set_float("uEtchDepth", float(p.etch_depth))
         self._set_float("uBaseAlpha", float(p.base_alpha))
-        self._set_float("uAlarm", float(alarm))
         self._set_float("uShatterT", float(self._shatter_t))
         self._set_float("uGravity", float(p.gravity * _GRAVITY_1G))
         self._set_float("uSpin", float(self._spin))
         self._set_float("uSpinAtBreak", float(self._spin_at_break))
+
+        # Glints. Fed from the same camera this frame is drawn with, so the
+        # lights land in the hemisphere the shot is actually taken from.
+        sparks = _spark_lights(
+            self._shatter_t, self._wedge_bounds, self._spin_at_break,
+            (cam.x(), cam.y(), cam.z()), p,
+        )
+        self._set_int("uSparkCount", len(sparks))
+        self._set_float("uSparkReach", float(p.spark_reach))
+        self._set_float("uSparkFocus", max(float(p.spark_focus), 0.01))
+        for i, (pos, radiance) in enumerate(sparks):
+            self._set(f"uSparkPos[{i}]", QVector3D(*pos))
+            self._set(f"uSparkRadiance[{i}]", QVector3D(*radiance))
 
         # Two passes, back surfaces first. The shard is translucent, so blend
         # order matters: draw the inside of the solid, then the outside over
@@ -2566,8 +2758,11 @@ class ShardWidget(QOpenGLWidget):
         self._post_set(
             "post_composite", "uBloomStrength", p.bloom, is_float=True
         )
+        # The flare's idle setting is held down to keep ghosts off the
+        # numerals; once the shard is in pieces that constraint is gone.
+        flare = p.flare * (p.spark_flare if self._shatter_t > 0.0 else 1.0)
         self._post_set(
-            "post_composite", "uFlareStrength", p.flare, is_float=True
+            "post_composite", "uFlareStrength", flare, is_float=True
         )
         self._post_set("post_composite", "uRolloff", p.rolloff, is_float=True)
         fns.glDrawArrays(_GL_TRIANGLES, 0, 3)

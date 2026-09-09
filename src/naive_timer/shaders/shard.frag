@@ -32,7 +32,24 @@ uniform float uEtch;          // 0 = emissive/lit, 1 = etched into the glass
 uniform float uEtchDepth;     // how sharply the engraving tilts the normal
 uniform float uBaseAlpha;
 
-uniform float uAlarm;         // 0..1, pulses after the countdown hits zero
+// Shatter glints. Transient point lights spawned beside the tumbling wedges
+// (see _spark_lights in shard.py), each one fading in and out over a couple of
+// hundred milliseconds. They exist to *force* the sparkle that the break only
+// sometimes produces by luck: a facet catches one of these head-on and throws a
+// highlight hot enough for the bright-pass to turn into glare and a flare.
+//
+// The light itself is never drawn -- there is no billboard, no glowing dot.
+// Everything you see of it is what the glass reflects.
+//
+// uSparkRadiance is colour * intensity * envelope, already folded together on
+// the CPU, so the shader has no per-light animation to redo. uSparkCount <=
+// MAX_SPARKS; the array is sized here and in _SPARK_MAX and the two must agree.
+#define MAX_SPARKS 6
+uniform int uSparkCount;
+uniform vec3 uSparkPos[MAX_SPARKS];
+uniform vec3 uSparkRadiance[MAX_SPARKS];
+uniform float uSparkReach;    // distance at which a spark is at half strength
+uniform float uSparkFocus;    // multiplier on uSpecPower for a spark's lobe
 
 void main() {
     // The radial cut faces exist so the tumbling wedges are solid rather than
@@ -137,20 +154,62 @@ void main() {
                 + cov * uGlow * (1.0 - uEtch);
     alpha = clamp(alpha + cov * uEtch * 0.25, 0.0, 1.0);
 
-    // Alarm: fade toward a mostly-transparent dark red and back.
+    // Shatter glints. Each spark is a real point light: same diffuse, specular
+    // and Fresnel terms as the key light, so a facet responds to it exactly as
+    // it would to the lamp -- which is what makes the flash read as a
+    // reflection rather than as an effect painted over the glass.
     //
-    // Tint the *lit* surface rather than replacing it. Mixing straight to a
-    // flat colour erased all shading at the pulse peak, so the tumbling
-    // wedges became red silhouettes and the lighting on them -- which is
-    // computed per-piece from their tumbled normals -- was invisible for half
-    // of every pulse.
-    const vec3 ALARM_COLOR = vec3(0.38, 0.02, 0.03);
-    vec3 alarmLit = ALARM_COLOR * 0.55
-                  + ALARM_COLOR * (1.7 * diff) * lightE
-                  + vec3(spec) * 0.55 * lightE
-                  + fres * ALARM_COLOR * 1.5;
-    col = mix(col, alarmLit, uAlarm);
-    alpha = mix(alpha, alpha * 0.40 + 0.08, uAlarm);
+    // Three differences from the key light, all deliberate:
+    //
+    // 1. Inverse-square falloff. The key light is effectively at infinity and
+    //    lights every wedge equally; a spark sits a fraction of a unit from
+    //    *one* wedge, so its own piece blazes while its neighbours barely
+    //    register. That locality is the whole effect -- pieces flashing out of
+    //    step with one another, not the whole field pulsing together.
+    // 2. No ambient contribution. A spark that lit the ambient floor would
+    //    wash the glass out flat instead of picking out facets.
+    // 3. The diffuse and Fresnel terms are weighted right down, and the
+    //    specular is not. This was measured, not assumed: at equal weights a
+    //    spark reads as a *flashbulb* -- whole wedges going evenly pink-white,
+    //    the facets they are made of washed out rather than picked out. What
+    //    was wanted is a glint, and a glint is specular by definition. The
+    //    diffuse that remains is what keeps the flash from looking painted on
+    //    (its host piece does lift a little), and it lifts the facets the
+    //    highlight is *not* on, which is what gives the highlight something to
+    //    be brighter than.
+    const float SPARK_DIFFUSE = 0.10;   // key light: 0.40
+    const float SPARK_FRESNEL = 0.35;   // key light: 1.0
+
+    float sparkHot = 0.0;
+    for (int i = 0; i < uSparkCount; ++i) {
+        vec3 toSpark = uSparkPos[i] - vWorld;
+        float dist2 = dot(toSpark, toSpark);
+        vec3 Ls = toSpark * inversesqrt(max(dist2, 1e-8));
+        vec3 Hs = normalize(Ls + V);
+
+        // Half strength at uSparkReach, and a quarter at twice it.
+        float atten = 1.0 / (1.0 + dist2 / max(uSparkReach * uSparkReach, 1e-6));
+        vec3 E = uSparkRadiance[i] * atten;
+
+        float sdiff = max(dot(N, Ls), 0.0);
+        // Tighter lobe than the key light's, by uSparkFocus. The presets on
+        // disk run spec_power anywhere from 9 (a broad sheen over a whole
+        // facet) to 40, and at the low end a spark's highlight covers the
+        // entire face it lands on: the piece stops reading as faceted glass
+        // and starts reading as a lit paper triangle. Narrowing the lobe is
+        // what keeps the flash a *glint* on a preset that was tuned for sheen.
+        float sspec = pow(max(dot(N, Hs), 0.0), uSpecPower * uSparkFocus)
+                    * uSpecStrength;
+
+        col += uGlassColor * (SPARK_DIFFUSE * sdiff) * E
+             + vec3(sspec) * E
+             + (SPARK_FRESNEL * fres) * uGlassColor * E;
+
+        // Same reasoning as the key light's contribution to alpha below: a
+        // facet blazing white has to stop the stars showing through it.
+        sparkHot += sspec * dot(E, vec3(0.3333));
+    }
+    alpha = clamp(alpha + sparkHot, 0.0, 1.0);
 
     // No tonemap here. This writes *linear radiance* into a floating-point
     // scene buffer, and post_composite.frag maps the whole frame -- shard, sky

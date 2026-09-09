@@ -6,8 +6,8 @@ not transfer between the web/mobile app and a local terminal session. The code
 travels via git; this document travels the *reasoning* that isn't obvious from
 the diff.
 
-_Last updated: 2026-08-10, after the HDR lighting pipeline landed on
-`feat/lighting-effects`._
+_Last updated: 2026-09-08, after the shatter glints landed on
+`feat/shatter-lights-flash`. (HDR lighting pipeline: 2026-08-10.)_
 
 The project brief that started all of this is `CLAUDE.md` at the repo root —
 read it first. It states the actual goal (probing accelerated 3D across
@@ -95,18 +95,22 @@ Key model details worth knowing before editing:
    convention). Could instead mean seconds, or we could auto-detect.
 2. **Duration vs. Alarm is an explicit dropdown**, not auto-detected from the
    text — because `12:00` is ambiguous (12 min 0 sec vs. 12:00 clock time).
-3. **Alert = shard fracture + dark-red pulse + looping chime for 120 s.** The
+3. **Alert = shard fracture + glinting pieces + looping chime for 120 s.** The
    duration is a parameter (`Countdown.alert_duration`). The original red
-   *background flash* was cut as too jarring; the alert is now carried entirely
-   by the shard. The chime character is hardcoded in `sound.py`.
+   *background flash* was cut as too jarring; so, later, was the dark-red pulse
+   that replaced it. The alert is now carried entirely by the shard breaking
+   and by the pieces flashing as they fall (`spark_*` in `ShardParams`). The
+   chime character is hardcoded in `sound.py`.
 
 ## Open questions (waiting on in-person / on-workstation review)
 
 Answered at the first local run:
 
 - [x] **Visual alert**: the red flash is **too busy / jarring**. Superseded by
-  the shard treatment below — on finish the shard breaks apart and pulses to a
-  mostly-transparent dark red at ~1–2 Hz until reset.
+  the shard treatment below — on finish the shard breaks apart. The dark-red
+  pulse that carried the first version of that is **gone too** (2026-09-08);
+  what announces the break now is the pieces catching the light as they tumble.
+  See *Shatter glints* below.
 - [x] **Spinner**: the orbiting-dots ring is distracting and is being
   **removed**, not kept alongside the 3D view.
 
@@ -179,9 +183,43 @@ Notes for whoever touches the shatter next:
   The shard's axis lies inside both cut planes, so a cap's normal is
   near-perpendicular to the direction from the shard centre and that dot
   product's sign is noise.
-- The alarm **tints** the lit surface rather than replacing it. Mixing straight
-  to a flat red erased all shading at each pulse peak, so the wedges became red
-  silhouettes and their per-piece lighting was invisible half the time.
+- **Shatter glints** (`spark_*`) replaced the red pulse. Transient point
+  lights are spawned beside the falling wedges; `_spark_lights` in `shard.py`
+  places them and `shard.frag` lights from them. Nothing draws the light
+  itself — everything you see is what the glass reflects, and the glare and
+  lens flare come for free because a hot facet clears the bright-pass on its
+  own. Points worth knowing before touching it:
+  - **Stateless.** A spark is a pure function of the break clock: spark *k* is
+    born in its own `1/rate` slot, jittered inside it, so nothing accumulates,
+    a reset needs no cleanup, and a break sparkles identically every run (same
+    reasoning as `_hash01` for the tumble). Only the *k*s whose slot can still
+    overlap now are evaluated, so cost does not grow with elapsed shatter time.
+  - **Placed in the camera-facing hemisphere**, 12°–68° off the view axis,
+    on a sphere of `spark_offset` wedge-radii around the piece it belongs to.
+    A uniformly random direction lights the piece just as well, but half those
+    highlights fire away from the viewer and are never seen — and being seen is
+    the entire point of forcing what used to happen by luck.
+  - **Specular-biased, and this was measured.** At the key light's own weights
+    (diffuse 0.40, Fresnel 1.0) a spark reads as a *flashbulb*: whole wedges go
+    evenly pink-white and the facets wash out instead of standing out. Blown
+    pixels (>0.97 luma) went from 1.4–3.8% of frame with no sparks to 10–22%
+    with them, across the frame rather than in spots. Diffuse is down to 0.10
+    and Fresnel to 0.35, `spark_intensity` came down from 26 to 14, and the
+    same measurement now reads 3–6% concentrated on individual pieces.
+  - **`spark_focus` narrows the lobe** (× `spec_power`). It exists because the
+    presets on disk run `spec_power` from 9.45 to 40: at the low end the key
+    light's own highlight covers a whole facet, and a spark using the same
+    exponent turns its wedge into a lit paper triangle.
+  - **Falloff is local on purpose.** `spark_reach` (half strength at that
+    distance) must stay under the separation between wedges, or every piece
+    flashes together and it reads as the whole field pulsing.
+  - `spark_flare` multiplies `flare` while the pieces are falling. The idle
+    flare is deliberately timid to keep ghosts off the numerals; once the shard
+    is in pieces there is no readout left to protect.
+  - The shader loop is bounded by `_SPARK_MAX` / `MAX_SPARKS` — **the two must
+    agree**. When more sparks are alive than that, the brightest survive.
+    While the shard is intact `uSparkCount` is 0, so this costs nothing until
+    the break.
 
 ### How to check a shader change actually did something
 
@@ -189,6 +227,11 @@ Render and measure; do not reason about it. Each of these caught a real bug:
 
 - *Is it lit?* Move the light, count changed pixels. (0 changed at the alarm
   peak proved the shading was being discarded.)
+- *Is the new light doing anything?* Render the same instant of the same break
+  twice, `spark_rate` at 0 and at its default, and count bright pixels. At the
+  *peak* of a flash, not at the first instant a spark exists — a spark a
+  millisecond into its fade-in shows nothing, and a test that lands on one is
+  measuring the timing lottery. (`test_the_glints_actually_reach_the_screen`.)
 - *Did the pose survive?* Compare silhouette masks across the frame boundary.
   (0.01% mismatch when the spin is preserved; 31% when it snaps to rest.)
 - *Is it drawing at all?* Force `FragColor` to a solid colour, then sample

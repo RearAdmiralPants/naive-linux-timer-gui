@@ -591,6 +591,180 @@ class NoGlTest(unittest.TestCase):
         self.assertGreater(ink(drawn), 0, "numerals must leave ink")
 
 
+class ShatterGlintTest(unittest.TestCase):
+    """The transient point lights that make the falling pieces flash.
+
+    All GL-free: ``_spark_lights`` is a pure function of the break clock, the
+    wedge bounds and the camera, which is exactly why it was written as one.
+    """
+
+    def _bounds(self):
+        """One wedge at the origin, unit radius, sitting still."""
+        return [((0.0, 0.0, 0.0), (0.0, 0.0, 0.0), 1.0)]
+
+    def test_glints_are_deterministic(self):
+        """Same break, same sparkle -- so a bad-looking flash reproduces."""
+        from naive_timer.shard import ShardParams, _spark_lights
+
+        params = ShardParams()
+        args = (0.8, self._bounds(), 0.0, (0.0, 0.0, 3.2), params)
+        self.assertEqual(_spark_lights(*args), _spark_lights(*args))
+
+    def test_no_glints_before_the_break_or_when_switched_off(self):
+        from naive_timer.shard import ShardParams, _spark_lights
+
+        bounds = self._bounds()
+        eye = (0.0, 0.0, 3.2)
+        self.assertEqual(
+            _spark_lights(0.0, bounds, 0.0, eye, ShardParams()), [],
+            "the intact shard must not glint",
+        )
+        self.assertEqual(
+            _spark_lights(0.8, bounds, 0.0, eye, ShardParams(spark_rate=0.0)), [],
+            "spark_rate 0 must be a real off switch",
+        )
+        self.assertEqual(
+            _spark_lights(0.8, bounds, 0.0, eye, ShardParams(spark_intensity=0.0)),
+            [],
+            "a zero-intensity spark is not worth a uniform slot",
+        )
+
+    def test_every_glint_lands_in_the_camera_hemisphere(self):
+        """The point of forcing the flash is that the viewer is there to see it.
+
+        With one wedge parked at the origin, a spark's offset from the wedge
+        centre *is* the placement direction, so the cone can be measured
+        directly rather than inferred.
+        """
+        import math
+
+        from naive_timer.shard import (
+            ShardParams, _SPARK_CONE_MAX_DEG, _SPARK_CONE_MIN_DEG, _spark_lights,
+        )
+
+        # gravity 0: with it on, the wedge falls out from under the sphere the
+        # sparks are placed on, and the offset would have to be measured from a
+        # moving centre rather than from the origin. That is what
+        # test_glints_follow_their_wedge_as_it_falls covers.
+        params = ShardParams(gravity=0.0)
+        bounds = self._bounds()
+        eye = (1.4, 0.6, 2.9)
+        elen = math.sqrt(sum(c * c for c in eye))
+        gaze = tuple(c / elen for c in eye)   # origin -> camera
+
+        seen = 0
+        for step in range(400):
+            for pos, _radiance in _spark_lights(
+                0.02 + step * 0.005, bounds, 0.0, eye, params
+            ):
+                seen += 1
+                dist = math.sqrt(sum(c * c for c in pos))
+                self.assertAlmostEqual(
+                    dist, params.spark_offset, places=5,
+                    msg="spark is not on the offset sphere around its wedge",
+                )
+                cosine = sum(pos[i] * gaze[i] for i in range(3)) / dist
+                angle = math.degrees(math.acos(max(-1.0, min(1.0, cosine))))
+                self.assertGreaterEqual(angle, _SPARK_CONE_MIN_DEG - 1e-6)
+                self.assertLessEqual(angle, _SPARK_CONE_MAX_DEG + 1e-6)
+        self.assertGreater(seen, 50, "no sparks were generated to check")
+
+    def test_the_break_flashes_rather_than_glowing(self):
+        """Sparks must come and go, not settle into a second lamp.
+
+        Measured on the *total radiance in the frame*, not on how many frames
+        have any spark at all -- that was the first thing tried and it is the
+        wrong instrument. At the default rate roughly two sparks are alive at
+        any instant (of six wedges), so nearly every frame has one somewhere
+        and a count says nothing about whether anything is flashing. What
+        flashing means is that the total swings: deep troughs, and peaks well
+        above the middle.
+        """
+        import statistics
+
+        from naive_timer.shard import ShardParams, _spark_lights
+
+        params = ShardParams()
+        bounds = self._bounds()
+        eye = (0.0, 0.5, 3.2)
+
+        totals = [
+            sum(max(radiance) for _pos, radiance in _spark_lights(
+                0.05 + i / 60.0, bounds, 0.0, eye, params))
+            for i in range(300)      # five seconds at 60 fps
+        ]
+        self.assertGreater(max(totals), 0.0, "the break never sparkles at all")
+
+        median = statistics.median(totals)
+        troughs = sum(1 for v in totals if v < median * 0.25)
+        self.assertGreater(
+            troughs, len(totals) * 0.03, "no dark gaps: this is a lamp, not a glint"
+        )
+        self.assertGreater(
+            max(totals), median * 2.0, "no peaks: the flashes never stand out"
+        )
+
+    def test_no_more_glints_than_the_shader_declares(self):
+        """Overrunning the uniform array would read past the end of it.
+
+        The survivors must also be the brightest -- dropping the flash the
+        viewer can see in favour of one just fading in gets the effect exactly
+        backwards.
+        """
+        from naive_timer.shard import _SPARK_MAX, ShardParams, _spark_lights
+
+        params = ShardParams(spark_rate=400.0, spark_life=0.6)
+        bounds = self._bounds()
+        eye = (0.0, 0.0, 3.2)
+
+        for step in range(60):
+            sparks = _spark_lights(0.4 + step * 0.01, bounds, 0.0, eye, params)
+            self.assertLessEqual(len(sparks), _SPARK_MAX)
+            peaks = [max(radiance) for _pos, radiance in sparks]
+            self.assertEqual(
+                peaks, sorted(peaks, reverse=True),
+                "the brightest sparks are not the ones that survived",
+            )
+
+    def test_the_envelope_starts_and_ends_dark(self):
+        """A spark that pops on or off is visible as a hard edge at 60 fps."""
+        from naive_timer.shard import _SPARK_ATTACK, _spark_envelope
+
+        self.assertEqual(_spark_envelope(0.0), 0.0)
+        self.assertEqual(_spark_envelope(1.0), 0.0)
+        self.assertEqual(_spark_envelope(-0.1), 0.0)
+        self.assertEqual(_spark_envelope(1.1), 0.0)
+        self.assertAlmostEqual(_spark_envelope(_SPARK_ATTACK), 1.0)
+        # Fast up, slower down: that asymmetry is what makes it read as a
+        # glint rather than as a lamp on a dimmer.
+        self.assertGreater(_spark_envelope(0.10), _spark_envelope(0.90))
+
+    def test_glints_follow_their_wedge_as_it_falls(self):
+        """The light is attached to a piece, not parked in space.
+
+        A spark left behind at the origin would light nothing a second later,
+        when its wedge is a unit away and still going.
+        """
+        import math
+
+        from naive_timer.shard import ShardParams, _spark_lights
+
+        params = ShardParams(spark_rate=60.0)
+        eye = (0.0, 0.0, 3.2)
+        # One wedge climbing steadily along +y, well clear of the offset
+        # sphere's own radius by the time we sample it.
+        bounds = [((0.0, 0.0, 0.0), (0.0, 4.0, 0.0), 0.2)]
+
+        for t in (0.5, 1.0, 1.5):
+            centre_y = 4.0 * t - 0.5 * params.gravity * 0.32 * t * t
+            for pos, _radiance in _spark_lights(t, bounds, 0.0, eye, params):
+                self.assertLess(
+                    math.dist(pos, (0.0, centre_y, 0.0)),
+                    params.spark_offset * 0.2 + 1e-6,
+                    "spark did not travel with its wedge",
+                )
+
+
 class CurvedFrontTest(unittest.TestCase):
     """The front-face subdivision and bulge sliders.
 
@@ -1664,6 +1838,73 @@ class GlTest(unittest.TestCase):
             > 8
         )
         self.assertGreater(differing, 20, "light colour never reached the shader")
+
+    def test_the_glints_actually_reach_the_screen(self):
+        """A spark has to end up as bright pixels, not just as a uniform.
+
+        The same lesson as everything else in this file that renders: a
+        plausible-looking uniform proves nothing, and this one crosses a
+        shader array, a dynamic loop bound and the whole HDR chain before it
+        becomes light. Rendered twice at one instant of one break -- glints
+        off, glints on -- and the pixels are counted.
+        """
+        from PySide6.QtWidgets import QApplication
+
+        from naive_timer.shard import ShardParams, ShardWidget, _spark_lights
+
+        class Model:
+            is_running = False
+
+        # gravity 0 keeps the wedges in frame; a long clear time keeps them
+        # being drawn. Neither affects what is being measured.
+        params = ShardParams(gravity=0.0, shatter_clear_s=30.0)
+        shard = ShardWidget(Model(), params)
+        shard.resize(320, 420)
+        shard.set_text("00:00")
+        shard.show()
+        QApplication.processEvents()
+
+        shard.set_alarm(True)
+        shard._elapsed = 0.0
+
+        # Sample the instant of the *strongest* flash rather than the first one
+        # with any spark alive at all. A spark a millisecond into its fade-in,
+        # or one lighting a wedge that happens to be edge-on, legitimately
+        # shows almost nothing -- and a test that lands on one of those is
+        # measuring the timing lottery instead of the effect.
+        eye = shard.camera()[0]
+        eye_t = (eye.x(), eye.y(), eye.z())
+        _peak, when = max(
+            (
+                sum(max(radiance) for _pos, radiance in _spark_lights(
+                    0.05 + step * 0.01, shard._wedge_bounds, 0.0, eye_t, params)),
+                0.05 + step * 0.01,
+            )
+            for step in range(200)
+        )
+        self.assertGreater(_peak, 0.0, "no spark was alive in the first 2 s")
+        shard._shatter_t = when
+
+        def hot():
+            shard.makeCurrent()
+            shard.paintGL()
+            image = shard.grabFramebuffer()
+            return sum(
+                1
+                for y in range(0, image.height(), 2)
+                for x in range(0, image.width(), 2)
+                if max(image.pixelColor(x, y).getRgb()[:3]) > 200
+            )
+
+        params.spark_rate = 0.0
+        dark = hot()
+        params.spark_rate = ShardParams.spark_rate
+        lit = hot()
+
+        self.assertGreater(
+            lit, dark * 1.5 + 20,
+            f"glints changed nothing on screen ({dark} -> {lit} bright pixels)",
+        )
 
     def test_sky_still_draws_after_the_pieces_have_cleared(self):
         """paintGL returns early once the shard is gone. The sky must precede

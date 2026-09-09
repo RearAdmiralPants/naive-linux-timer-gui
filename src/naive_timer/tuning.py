@@ -139,6 +139,18 @@ _CRYSTAL_SLIDERS = [
 _SHATTER_SLIDERS = [
     ("gravity", 0.0, 2.0),          # g: 0 drifts flat, 1 the tuned fall, 2 heavy
     ("shatter_clear_s", 1.0, 20.0), # seconds the pieces are drawn before clearing
+    # Glints. spark_intensity is a multiplier on light_intensity, so its useful
+    # range is wide -- the flash has to out-shout a lamp that may already be at
+    # 4. Below spark_offset 1.0 the light sits inside the wedge and only the
+    # interior faces catch it, which is a different (dimmer, milkier) look
+    # worth having on the slider rather than hidden behind a constant.
+    ("spark_rate", 0.0, 40.0),      # flashes/sec; 0 turns them off
+    ("spark_intensity", 0.0, 60.0),
+    ("spark_life", 0.02, 1.0),
+    ("spark_offset", 0.0, 3.0),     # in the host wedge's bounding radii
+    ("spark_focus", 0.2, 8.0),      # x spec_power for the glint's lobe
+    ("spark_reach", 0.05, 3.0),
+    ("spark_flare", 0.0, 8.0),      # flare multiplier while the pieces fall
 ]
 
 # Frame-wide, not shard-wide: these run over the composited scene, after the

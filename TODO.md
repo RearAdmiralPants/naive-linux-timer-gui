@@ -3,13 +3,26 @@
 ([x] done)
 
 On shatter:
-- Nix the red fading effects
-- Can we do something with the scene lighting to cause the shattered shards to kind of sparkle intensely/noticeably? Alternatively, each shard could get a light source inside, with each one on a different rhythm of fading quickly to very high intensity and back down - we can iterate
+- [x] Nix the red fading effects
+- [x] Can we do something with the scene lighting to cause the shattered shards
+      to kind of sparkle intensely/noticeably? Alternatively, each shard could
+      get a light source inside, with each one on a different rhythm of fading
+      quickly to very high intensity and back down - we can iterate
   - The HDR chain is the enabler: a per-wedge specular pulse clipped to flat
     white in the old 8-bit pass, and now throws glare and streaks proportional
     to how hot it actually gets. light_intensity + flare are the levers, and
     there is no readout left to keep legible, so both can go well past their
     idle defaults.
+  - Done as *transient point lights beside the pieces* rather than inside them:
+    each is placed on a sphere around one wedge, in the hemisphere facing the
+    camera (12-68 degrees off the view axis), and fades in and out over ~0.2 s.
+    Being outside is what makes the flash land on the outward faces you can
+    see; a light inside a closed solid only reaches the interior surfaces. Six
+    `spark_*` sliders under Shatter, `spark_rate = 0` is the off switch. Notes
+    and the measurements in docs/HANDOFF.md.
+  - Still open, if it wants another pass: the glints do not yet key off the
+    *sound* (no flash on the impact transient), and every spark is the light's
+    own colour -- a little hue scatter might sell the dispersion.
 - Warm up the sound ~1s before shattering so e.g. bluetooth sinks don't miss the first 1/4s
 
 
