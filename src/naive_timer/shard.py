@@ -483,18 +483,25 @@ class ShardParams:
     #
     # strobe_delay_s is measured from the break, not from the pieces clearing:
     # a fixed, predictable beat, rather than one that moves with gravity and
-    # the camera. strobe_shape is the exponent on the approach -- 2.0 is the
-    # parabola this was asked for, and it is what keeps most of each cycle down
-    # near zero (below half peak for 71% of it) so the thing reads as a pulse
-    # rather than as a flickering light. Higher is sharper and darker; 1.0 is a
-    # plain triangle wave and looks like a fade.
+    # the camera. strobe_shape is the exponent on the approach -- 2.0 is a
+    # parabola, and it is what keeps most of each cycle down near zero (below
+    # half peak for 71% of it) so the thing reads as a pulse rather than as a
+    # flickering light. Higher is sharper and darker; 1.0 is a plain triangle
+    # wave and looks like a fade.
+    #
+    # Note the shape's duty is a *fraction* of the cycle, so lengthening the
+    # period stretches the lit part with everything else: at 4 s the parabola
+    # spends about 1.2 s above half peak, which is a swell rather than a flash.
+    # Raise strobe_shape if you lengthen the period and want it to stay
+    # flash-like -- at 5.0 it is above half peak for a seventh of the cycle
+    # rather than a third.
     #
     # 0 delay is not an off switch (that is strobe_peak = 0), it just starts
     # the pulse at the break -- which is worth a look, but it fights the glints
     # for the first few seconds and washes out the crack.
     strobe_delay_s: float = 10.0
-    strobe_period_s: float = 1.1
-    strobe_peak: float = 0.9
+    strobe_period_s: float = 4.0
+    strobe_peak: float = 0.7
     strobe_shape: float = 2.0
 
     # Front-face curvature. Unlike everything above, these two rebuild the

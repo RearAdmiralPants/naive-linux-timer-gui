@@ -40,8 +40,9 @@ On shatter:
 
 On the alert, after the shatter:
 - [x] Full-frame pulse in the light colour once the pieces are gone
-      (`strobe_*`): parabolic approach to 90%, just under once a second,
-      starting 10 s after the break. Most of each cycle sits near zero.
+      (`strobe_*`): parabolic approach to 70% opacity every 4 s, starting 10 s
+      after the break. Most of each cycle sits near zero. First tuned at 90%
+      and ~1 s, which was too aggressive on both axes.
 - [x] The Timer's alert no longer expires -- glitter, then strobing over an
       empty starfield, until Dismiss / a new countdown / switching to the
       Stopwatch. The chime still stops at `alert_duration` (120 s); only the

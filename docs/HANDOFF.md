@@ -262,9 +262,9 @@ leave the alert, wire it or the strobe waits behind a tab forever.
 frame, starting `strobe_delay_s` after the break, when the pieces have long gone
 and an alarm that is still ringing has nothing on screen to show for it.
 
-- **After the tonemap, deliberately.** That is what makes `strobe_peak = 0.9`
-  mean "90% of the frame is this colour". Upstream in linear light the number
-  would mean nothing (radiance 0.9 of white is a mid grey once the curve has
+- **After the tonemap, deliberately.** That is what makes `strobe_peak = 0.7`
+  mean "70% of the frame is this colour". Upstream in linear light the number
+  would mean nothing (radiance 0.7 of white is a mid grey once the curve has
   had it) and the glare and flare passes would treat the wash as a light
   source and bloom it.
 - **Parabolic, and that is the point.** `alpha = peak * |2*phase - 1| **
@@ -273,6 +273,13 @@ and an alarm that is still ringing has nothing on screen to show for it.
   a pulse in the dark rather than as a light left flickering. Shape 1.0 is a
   triangle wave and looks like a fade; it is pinned by
   `test_most_of_the_cycle_is_spent_dark`.
+- **The period and the shape interact**, which matters when retuning. The
+  shape's duty is a fraction of the *cycle*, so lengthening the period
+  stretches the lit part along with everything else. This was first tuned at
+  0.9 opacity and a 1.1 s period -- a flash -- and softened to 0.7 every 4 s,
+  which at the same exponent is a 1.2 s swell rather than a 0.3 s flash. If a
+  long period should still read as a flash, `strobe_shape` is the lever: at
+  4 s, shape 2.0 is above half peak for 1.17 s, 3.5 for 0.72 s, 5.0 for 0.52 s.
 - **The phase is offset half a cycle** so the first pulse builds. Opening on
   the cusp put a full-strength flash on the frame the delay expired, which
   reads as a glitch rather than as the start of something.

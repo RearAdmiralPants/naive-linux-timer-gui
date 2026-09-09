@@ -25,9 +25,9 @@ and verified without a display; the Qt layer is a thin view on top.
   hemisphere you are watching from, so the glass catches the light instead of
   waiting to be lucky — plus a gentle chime that loops quietly for ~2 minutes
   (configurable)
-- Once the pieces have gone the whole view pulses in the light's colour, about
-  once a second, and **keeps pulsing**: the alert does not expire. It ends when
-  you hit **Dismiss**, start another countdown, or switch to the Stopwatch. The
+- Once the pieces have gone the whole view swells to the light's colour every
+  4 seconds, and **keeps pulsing**: the alert does not expire. It ends when you
+  hit **Dismiss**, start another countdown, or switch to the Stopwatch. The
   chime still stops on its own after its window; only the sound is bounded
 - The Stopwatch's **Reset** breaks the shard too, and cracks out loud — the
   glass only, no chime, since nothing is waiting on you afterwards. Press it
