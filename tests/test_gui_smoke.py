@@ -1899,6 +1899,54 @@ class GlTest(unittest.TestCase):
             stopwatch._shatter_sound, "held the stream open after the reset"
         )
 
+    def test_a_second_reset_press_skips_the_wait(self):
+        """Reset again while the shard is still falling and it finishes now.
+
+        The shatter is a flourish, and a control that ignores you for the five
+        seconds it runs is a broken control. The forced path must land in
+        exactly the same state as the timed one -- zeroed model, shard whole,
+        no audio stream still open -- which is why both go through
+        _finish_reset rather than each doing their own tidying.
+        """
+        from naive_timer import app
+        from naive_timer.app import MainWindow
+        from naive_timer.stopwatch import State
+
+        window = MainWindow()
+        stopwatch = window.stopwatch_tab
+
+        stopwatch._sw.start()
+        stopwatch._sw._accumulated = 42.0     # something to visibly throw away
+        stopwatch._on_reset()
+        self.assertTrue(stopwatch._resetting)
+        self.assertTrue(stopwatch._shard._alarm)
+
+        # Mid-shatter: the pieces are nowhere near gone, so the timed path
+        # would not fire for seconds yet.
+        stopwatch._shard._shatter_t = 0.2
+        stopwatch._tick()
+        self.assertTrue(stopwatch._resetting, "the wait ended on its own")
+
+        stopwatch._on_reset()
+        self.assertFalse(stopwatch._resetting, "the second press was swallowed")
+        self.assertFalse(stopwatch._shard._alarm, "the shard never reassembled")
+        self.assertEqual(stopwatch._sw.elapsed(), 0.0)
+        self.assertIs(stopwatch._sw.state, State.STOPPED)
+        if app._HAVE_AUDIO:
+            self.assertIsNone(
+                stopwatch._shatter_sound, "held the stream open past the reset"
+            )
+
+        # And the tab is usable again immediately: Start was locked out while
+        # the reset ran, and must not stay locked out.
+        stopwatch._on_toggle()
+        self.assertIs(stopwatch._sw.state, State.RUNNING)
+
+        # A third press starts a fresh shatter rather than doing nothing.
+        stopwatch._on_reset()
+        self.assertTrue(stopwatch._resetting)
+        self.assertTrue(stopwatch._shard._alarm)
+
     def test_stay_on_top_reaches_the_window_manager(self):
         """The checkbox must change the WM's mind, not merely send a message.
 

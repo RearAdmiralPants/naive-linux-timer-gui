@@ -30,7 +30,9 @@ and verified without a display; the Qt layer is a thin view on top.
   you hit **Dismiss**, start another countdown, or switch to the Stopwatch. The
   chime still stops on its own after its window; only the sound is bounded
 - The Stopwatch's **Reset** breaks the shard too, and cracks out loud — the
-  glass only, no chime, since nothing is waiting on you afterwards
+  glass only, no chime, since nothing is waiting on you afterwards. Press it
+  again while the pieces are still falling and it finishes there and then,
+  rather than making you wait out the shatter
 - Both the chime and the shatter are synthesized at runtime (no binary asset);
   point the alert at your own WAV to customize
 

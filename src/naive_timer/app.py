@@ -477,7 +477,13 @@ class StopwatchWidget(QWidget):
         # freezes the readout at its final value so the numerals fly apart
         # showing that time; the model is zeroed only once the pieces clear
         # (see _tick), after which the shard reassembles at 00:00:00.
+        #
+        # Pressed again while that is still running, it means "get on with it":
+        # the wait is a flourish, and a control that ignores you for five
+        # seconds is a broken control. So the second press finishes the reset
+        # on the spot rather than being swallowed.
         if self._resetting:
+            self._finish_reset()
             return
         self._resetting = True
         self._sw.pause()
@@ -490,17 +496,28 @@ class StopwatchWidget(QWidget):
             self._shatter_sound.play()
         self._start_btn.setText("Start")
 
+    def _finish_reset(self) -> None:
+        """Zero the model and put the shard back together.
+
+        Reached two ways: the pieces clearing on their own, and a second press
+        of Reset cutting the wait short. Identical either way -- a forced reset
+        must not leave a half-torn state behind that only the timed path knows
+        how to clean up.
+        """
+        self._sw.reset()
+        self._shard.set_alarm(False)  # reassemble at zero
+        self._resetting = False
+        # Down with the picture. On the timed path the clip (3 s) has finished
+        # long before the pieces clear and this is a formality; on the forced
+        # path it can still be mid-crack, and a smash that goes on ringing over
+        # a shard that is visibly whole again is worse than a clipped tail.
+        if self._shatter_sound is not None:
+            self._shatter_sound.stop()
+            self._shatter_sound = None
+
     def _tick(self) -> None:
         if self._resetting and self._shard.pieces_have_cleared:
-            self._sw.reset()
-            self._shard.set_alarm(False)  # reassemble at zero
-            self._resetting = False
-            # The clip is shorter than the shatter it accompanies, so by here
-            # it has finished on its own; stop() only matters if someone has
-            # shortened shatter_clear_s below the length of the sound.
-            if self._shatter_sound is not None:
-                self._shatter_sound.stop()
-                self._shatter_sound = None
+            self._finish_reset()
         self._shard.set_text(format_elapsed(self._sw.elapsed()))
         self._shard.advance(self._clock.tick())
 
