@@ -19,10 +19,11 @@ from naive_timer.tuning import apply_json_dict, load_params_file, ParamsError
 from naive_timer.countdown import parse_duration, parse_alarm
 from naive_timer.app import _parse_cli
 
-# Path to real params files in the repo root.
-_REPO_ROOT = os.path.join(os.path.dirname(__file__), "..")
-_DEFAULT_PARAMS = os.path.join(_REPO_ROOT, "default-params.json")
-_GREEN_NEBULA = os.path.join(_REPO_ROOT, "green-nebula.json")
+# Path to the real params files, which live in json/ (they were at the repo
+# root until ff7f729 moved them, which is what broke these three tests).
+_JSON_DIR = os.path.join(os.path.dirname(__file__), "..", "json")
+_DEFAULT_PARAMS = os.path.join(_JSON_DIR, "default-params.json")
+_GREEN_NEBULA = os.path.join(_JSON_DIR, "green-nebula.json")
 
 
 class ParseCliTest(unittest.TestCase):
@@ -140,7 +141,7 @@ class LoadParamsFileTest(unittest.TestCase):
 
     def test_directory_rejected(self) -> None:
         with self.assertRaises(ParamsError) as cm:
-            load_params_file(_REPO_ROOT)
+            load_params_file(_JSON_DIR)
         self.assertIn("not a file", str(cm.exception))
 
     def test_invalid_json(self) -> None:
