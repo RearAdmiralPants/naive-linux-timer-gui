@@ -930,7 +930,7 @@ skips itself: Qt's `offscreen` platform has no OpenGL, and constructing a
 Design and milestones: `docs/features/gravitational-dust-eddies-albedo.md`.
 Gotchas found building M1:
 
-- **The 3.3 core request is a floor, not a ceiling.** Mesa (iGPU, llvmpipe) and NVIDIA both hand back their highest core version (4.5–4.6), so compute shaders work without changing `default_surface_format`. `DustField.initialize` checks the *actual* version and disables itself below 4.3 instead of crashing.
+- **Request the GL version you need, because NVIDIA gives you exactly that.** Mesa (Intel, AMD, llvmpipe) answers a 3.3 core request with its highest version (4.5–4.6). NVIDIA returns a bare 3.3. M1–M4 were built and verified on Mesa only, so on `--gpu nvidia` the dust silently disabled itself; the user found it by running the app. `default_surface_format` now asks for 4.3. `DustField.initialize` still checks the *actual* version and disables itself below 4.3 rather than crashing. **Verify each GPU separately:** `tools/snap_gpu.py` renders hidden on the real driver, and `bench_frame.py` now refuses to time a feature that's unavailable.
 - **PySide6 `QOpenGLBuffer.read` takes `(offset, buffer, count)`**, not `(offset, count)`. `ctx.extraFunctions()` exposes `glDispatchCompute`, `glMemoryBarrier` and `glBindBufferBase`, which is all compute needs.
 - **The dust is fill-bound, not compute-bound**, on the iGPU (`tools/bench_frame.py`): soft sprites blended into the 4× MSAA RGBA16F scene target. Shrinking the sprites recovers almost everything. See TODO for the planned fix.
 - **Stills need `--sim`.** The dust is stateful, so `render_still.py` steps it forward to each time instead of setting it, the way it does for the sway and the shatter.

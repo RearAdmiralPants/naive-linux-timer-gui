@@ -63,7 +63,8 @@ Dust & eddies (feat/gravitational-dust-eddies-albedo; see docs/features/):
   shard; crepuscular rays
 - Perf hotspot #1: dust is fill-bound on the iGPU (1080p: 15.4 -> 33.9 ms;
   tiny grains -> 17.1 ms, so ~1.7 ms is sim+vertex). Render dust to a
-  half-res non-MSAA target and composite. NVIDIA 3050: no measurable cost.
+  half-res non-MSAA target and composite. NVIDIA 3050: +0.84 ms (3.92 ->
+  4.76 ms). An earlier "no measurable cost" was the dust being disabled.
 - Sliders let *_min exceed *_max (tolerated: values are drawn from the span)
 
 ---

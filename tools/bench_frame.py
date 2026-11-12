@@ -56,6 +56,12 @@ def main() -> int:
     widget.grabFramebuffer()  # initializeGL
     ctx = widget.context()
     print(f"renderer: {ctx.functions().glGetString(0x1F01)}  {w}x{h}")
+    # A disabled feature benchmarks as free. That once went unnoticed for a
+    # whole milestone on NVIDIA (bare 3.3 context, dust off), so refuse.
+    if args.toggle in ("dust_enabled", "eddies_enabled") and not widget._dust.available:
+        print(f"error: dust is unavailable here ({widget._dust.error}); "
+              "on/off timings would be meaningless", file=sys.stderr)
+        return 1
 
     for state in (False, True):
         setattr(params, args.toggle, state)

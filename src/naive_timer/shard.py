@@ -746,9 +746,16 @@ def _sky_fragment_source(defines: tuple[str, ...] = ()) -> str:
 
 
 def default_surface_format() -> QSurfaceFormat:
-    """A 3.3 core profile with multisampling. Must be set before QApplication."""
+    """A 4.3 core profile with multisampling. Must be set before QApplication.
+
+    4.3 because the dust (dust.py) needs compute shaders and SSBOs. It was
+    3.3, and that *looked* sufficient: Mesa (Intel, AMD, llvmpipe) answers a
+    3.3 request with its highest core version anyway. NVIDIA gives back
+    exactly what was asked for, so on the discrete GPU the dust silently
+    disabled itself. Every GPU this project targets supports 4.6.
+    """
     fmt = QSurfaceFormat()
-    fmt.setVersion(3, 3)
+    fmt.setVersion(4, 3)
     fmt.setProfile(QSurfaceFormat.CoreProfile)
     fmt.setDepthBufferSize(24)
     fmt.setSamples(4)
