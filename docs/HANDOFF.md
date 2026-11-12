@@ -925,6 +925,16 @@ Without a display **and** without `xvfb-run`, the GL tier of the smoke test
 skips itself: Qt's `offscreen` platform has no OpenGL, and constructing a
 `QOpenGLWidget` under it *segfaults* rather than raising. Use `xvfb-run` in CI.
 
+## Dust clouds — branch `feat/gravitational-dust-eddies-albedo`
+
+Design and milestones: `docs/features/gravitational-dust-eddies-albedo.md`.
+Gotchas found building M1:
+
+- **The 3.3 core request is a floor, not a ceiling.** Mesa (iGPU, llvmpipe) and NVIDIA both hand back their highest core version (4.5–4.6), so compute shaders work without changing `default_surface_format`. `DustField.initialize` checks the *actual* version and disables itself below 4.3 instead of crashing.
+- **PySide6 `QOpenGLBuffer.read` takes `(offset, buffer, count)`**, not `(offset, count)`. `ctx.extraFunctions()` exposes `glDispatchCompute`, `glMemoryBarrier` and `glBindBufferBase`, which is all compute needs.
+- **The dust is fill-bound, not compute-bound**, on the iGPU (`tools/bench_frame.py`): soft sprites blended into the 4× MSAA RGBA16F scene target. Shrinking the sprites recovers almost everything. See TODO for the planned fix.
+- **Stills need `--sim`.** The dust is stateful, so `render_still.py` steps it forward to each time instead of setting it, the way it does for the sway and the shatter.
+
 ## Branches
 
 `main` carries the shard. The glass volume, starfield, shatter sound and colour

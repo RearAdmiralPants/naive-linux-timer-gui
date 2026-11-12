@@ -187,6 +187,31 @@ _SKY_SLIDERS = [
     ("star_brightness", 0.0, 2.0),
 ]
 
+# dust_clouds and dust_particles are counts, so like front_subdiv they get
+# scale 1 and step in whole units (particles are rounded to 128s downstream).
+_DUST_SLIDERS = [
+    ("dust_clouds", 0.0, 24.0, 1),
+    ("dust_particles", 128.0, 8192.0, 1),
+    ("dust_size_min", 0.1, 4.0),
+    ("dust_size_max", 0.1, 4.0),
+    ("dust_volume_min", 0.05, 1.0),
+    ("dust_volume_max", 0.05, 1.0),
+    ("dust_speed_min", 0.0, 1.0),
+    ("dust_speed_max", 0.0, 1.0),
+    ("dust_albedo_min", 0.0, 1.0),
+    ("dust_albedo_max", 0.0, 1.0),
+    ("dust_aniso_min", -0.95, 0.95),
+    ("dust_aniso_max", -0.95, 0.95),
+    ("dust_grain", 0.02, 0.6),
+    ("dust_opacity", 0.0, 0.5),
+    ("dust_brightness", 0.0, 10.0),
+    ("dust_ambient", 0.0, 2.0),
+    ("dust_cohesion", 0.0, 4.0),
+    ("dust_drag", 0.0, 4.0),
+    ("dust_turbulence", 0.0, 2.0),
+    ("dust_swirl", 0.0, 1.0),
+]
+
 _CAMERA_SLIDERS = [
     ("orbit_speed", 0.0, 0.8),
     ("sway_degrees", 0.0, 180.0),   # 180 = a full orbit; the numerals turn away
@@ -292,6 +317,7 @@ class TuningPanel(QWidget):
         left.addWidget(self._slider_group("Crystal", _CRYSTAL_SLIDERS))
         right.addWidget(self._slider_group("Camera", _CAMERA_SLIDERS))
         right.addWidget(self._slider_group("Sky", _SKY_SLIDERS))
+        right.addWidget(self._build_dust_group())
         right.addWidget(self._slider_group("Shatter", _SHATTER_SLIDERS))
         right.addWidget(self._slider_group("Tonemap and glare", _POST_SLIDERS))
 
@@ -409,6 +435,28 @@ class TuningPanel(QWidget):
             form.addRow(name, row)
         return box
 
+    def _build_dust_group(self) -> QGroupBox:
+        box = self._slider_group("Dust", _DUST_SLIDERS)
+        form = box.layout()
+
+        self._dust_enabled = QCheckBox()
+        self._dust_enabled.setChecked(self._params.dust_enabled)
+        self._dust_enabled.toggled.connect(self._on_dust_enabled)
+        form.insertRow(0, "enabled", self._dust_enabled)
+
+        self._dust_a = _HexColorEdit(
+            self._params.dust_color_a, lambda c: self._set("dust_color_a", c)
+        )
+        form.addRow("dust A", self._dust_a)
+        self._dust_b = _HexColorEdit(
+            self._params.dust_color_b, lambda c: self._set("dust_color_b", c)
+        )
+        form.addRow("dust B", self._dust_b)
+        return box
+
+    def _on_dust_enabled(self, checked: bool) -> None:
+        self._set("dust_enabled", checked)
+
     def _on_slider(self, name: str, value: float) -> None:
         self._labels[name].setText(f"{value:.2f}")
         self._set(name, value)
@@ -510,12 +558,18 @@ class TuningPanel(QWidget):
         self._bold.setChecked(self._params.font_bold)
         self._bold.blockSignals(False)
 
+        self._dust_enabled.blockSignals(True)
+        self._dust_enabled.setChecked(self._params.dust_enabled)
+        self._dust_enabled.blockSignals(False)
+
         for edit, name in (
             (self._text_color, "text_color"),
             (self._glass_color, "glass_color"),
             (self._light_color, "light_color"),
             (self._nebula_a, "nebula_color_a"),
             (self._nebula_b, "nebula_color_b"),
+            (self._dust_a, "dust_color_a"),
+            (self._dust_b, "dust_color_b"),
         ):
             edit.blockSignals(True)
             edit.setText(format_hex_color(getattr(self._params, name)))
@@ -527,16 +581,17 @@ class TuningPanel(QWidget):
         print("\n# --- paste into ShardParams defaults ---")
         for name, _lo, _hi, *_ in (
             _SLIDERS + _GEOMETRY_SLIDERS + _CRYSTAL_SLIDERS + _POST_SLIDERS
-            + _CAMERA_SLIDERS + _SKY_SLIDERS + _SHATTER_SLIDERS
+            + _CAMERA_SLIDERS + _SKY_SLIDERS + _DUST_SLIDERS + _SHATTER_SLIDERS
         ):
             print(f"    {name}: float = {getattr(p, name):.2f}")
         for name in (
             "glass_color", "text_color", "light_color",
-            "nebula_color_a", "nebula_color_b",
+            "nebula_color_a", "nebula_color_b", "dust_color_a", "dust_color_b",
         ):
             rgb = getattr(p, name)
             pretty = ", ".join(f"{c:.3f}" for c in rgb)
             print(f"    {name}: tuple = ({pretty})  # {format_hex_color(rgb)}")
         print(f'    font_family: str = "{p.font_family}"')
         print(f"    font_bold: bool = {p.font_bold}")
+        print(f"    dust_enabled: bool = {p.dust_enabled}")
         print("# ---------------------------------------\n")

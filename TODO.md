@@ -53,8 +53,12 @@ On the alert, after the shatter:
   the tab bar stay as they are. Widen it if the pulse needs to be louder.
 
 Dust & eddies (feat/gravitational-dust-eddies-albedo; see docs/features/):
-- In progress: M1-M5 per the feature doc
+- In progress: M2-M5 per the feature doc
 - HIGH PRIORITY post-MVP: shatter fragments caught in eddy orbits
+- Perf hotspot #1: dust is fill-bound on the iGPU (1080p: 15.4 -> 33.9 ms;
+  tiny grains -> 17.1 ms, so ~1.7 ms is sim+vertex). Render dust to a
+  half-res non-MSAA target and composite. NVIDIA 3050: no measurable cost.
+- Sliders let *_min exceed *_max (tolerated: values are drawn from the span)
 
 ---
 - Optimizations

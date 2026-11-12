@@ -46,6 +46,8 @@ from PySide6.QtOpenGL import (
 from PySide6.QtOpenGLWidgets import QOpenGLWidget
 from PySide6.QtWidgets import QApplication
 
+from .dust import SHADER_FILES as _DUST_SHADER_FILES, DustField
+
 _SHADER_DIR = Path(__file__).parent / "shaders"
 
 # GL enums we need but QOpenGLFunctions does not re-export.
@@ -624,6 +626,43 @@ class ShardParams:
     nebula_color_b: tuple = (0.42, 0.13, 0.34)
     star_density: float = 90.0
     star_brightness: float = 1.0
+
+    # Dust clouds (dust.py). Every *_min/*_max pair is a range each new cloud
+    # draws its own value from, so the field is never uniform. dust_enabled is
+    # the master switch for the whole section.
+    #
+    # dust_albedo is meant physically: the share of intercepted light a grain
+    # scatters rather than absorbs. Low albedo makes dark lanes that blot out
+    # what is behind them; high albedo makes clouds that glow. dust_aniso is
+    # the Henyey-Greenstein g: > 0 scatters forward (dust between you and a
+    # light blazes), < 0 back toward the light (reads as reflective).
+    # dust_volume is the share of a cloud's particle slots it fills -- with
+    # dust_size, that is what makes one cloud thin and another dense.
+    dust_enabled: bool = True
+    dust_clouds: float = 8.0
+    dust_particles: float = 3072.0     # slots per cloud; rounded to 128s
+    dust_size_min: float = 0.5
+    dust_size_max: float = 1.6
+    dust_volume_min: float = 0.35
+    dust_volume_max: float = 1.0
+    dust_speed_min: float = 0.06
+    dust_speed_max: float = 0.22
+    dust_albedo_min: float = 0.15
+    dust_albedo_max: float = 0.95
+    dust_aniso_min: float = -0.3
+    dust_aniso_max: float = 0.75
+    dust_color_a: tuple = (0.92, 0.66, 0.45)
+    dust_color_b: tuple = (0.55, 0.68, 0.95)
+    # Tuned on stills: smaller, more opaque grains read as sand rather than
+    # cloud; much larger ones wash the frame out into fog.
+    dust_grain: float = 0.16           # sprite half-size, scene units
+    dust_opacity: float = 0.08
+    dust_brightness: float = 2.5
+    dust_ambient: float = 0.35
+    dust_cohesion: float = 0.8
+    dust_drag: float = 0.9
+    dust_turbulence: float = 0.25
+    dust_swirl: float = 0.12
 
 
 def _sky_fragment_source(defines: tuple[str, ...] = ()) -> str:
@@ -1931,12 +1970,17 @@ class ShardWidget(QOpenGLWidget):
         self._geometry_dirty = True
         self._rebuild_geometry()
 
+        # Simulated and drawn on the GPU; this widget only feeds it time and
+        # the camera. See dust.py.
+        self._dust = DustField()
+
         self.setMinimumSize(280, 280)
 
         self._watcher = QFileSystemWatcher(self)
         for name in (
             "shard.vert", "shard.frag", "sky.vert", "sky.frag",
             *(f"{stage}.frag" for stage in _POST_STAGES),
+            *_DUST_SHADER_FILES,
         ):
             self._watcher.addPath(str(_SHADER_DIR / name))
         self._watcher.fileChanged.connect(self._on_shader_changed)
@@ -1975,8 +2019,9 @@ class ShardWidget(QOpenGLWidget):
 
     def advance(self, dt: float) -> None:
         # The sky drifts and twinkles in every state, including after the
-        # shard has shattered and stopped being drawn.
+        # shard has shattered and stopped being drawn. So does the dust.
         self._elapsed += dt
+        self._dust.advance(dt)
 
         if self._alarm:
             # The pieces tumble away and keep going, glinting as they fall,
@@ -2176,6 +2221,7 @@ class ShardWidget(QOpenGLWidget):
         if path not in self._watcher.files():
             self._watcher.addPath(path)
         self._shaders_dirty = True
+        self._dust.mark_shaders_dirty()
         self.update()
 
     def _load_program(self) -> None:
@@ -2669,6 +2715,7 @@ class ShardWidget(QOpenGLWidget):
         self._load_program()
         self._load_sky_program()
         self._load_post_programs()
+        self._dust.initialize(self.context())
 
     def paintGL(self) -> None:  # noqa: N802
         if self._shaders_dirty:
@@ -2699,6 +2746,15 @@ class ShardWidget(QOpenGLWidget):
         # Backdrop first, and unconditionally: the shard may be gone, but the
         # sky is still there.
         self._draw_sky(fns)
+        # Between the two: dust behind the shard is seen through the glass,
+        # and dust in front is only lightly veiled by it (base_alpha), which
+        # is a far smaller error than the alternative of hiding it outright
+        # behind the glass's depth writes.
+        self._dust.render(
+            fns, self.context().extraFunctions(), self._sky_vao, self.params,
+            self.camera(), max(self.width(), 1) / max(self.height(), 1),
+            _FOV_DEGREES,
+        )
         self._draw_shard(fns)
 
         # Multisampled targets cannot be sampled from, so resolve down to a

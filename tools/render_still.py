@@ -43,6 +43,11 @@ def main() -> int:
     ap.add_argument("--shatter", default="",
                     help="comma-separated shatter times; renders the break "
                          "instead of the intact shard, one file per time")
+    ap.add_argument("--sim", default="",
+                    help="comma-separated, increasing dust-simulation times; "
+                         "one file per time. The dust is stateful (unlike the "
+                         "sway or the shatter), so it is stepped forward to "
+                         "each time rather than set. Sets elapsed to match.")
     args = ap.parse_args()
 
     QCoreApplication.setAttribute(Qt.ApplicationAttribute.AA_ShareOpenGLContexts)
@@ -80,8 +85,16 @@ def main() -> int:
     else:
         shatters = [None]
 
-    frames = [(e, s) for s in shatters for e in angles]
+    sims = [float(v) for v in args.sim.split(",")] if args.sim else []
+    if sims:
+        frames = [(t, s) for s in shatters for t in sims]
+    else:
+        frames = [(e, s) for s in shatters for e in angles]
+    simulated = 0.0
     for i, (elapsed, shatter) in enumerate(frames):
+        if sims and elapsed > simulated:
+            widget._dust.simulate(elapsed - simulated)
+            simulated = elapsed
         widget._elapsed = elapsed
         widget._spin = spins[i % len(spins)]
         if shatter is not None:
