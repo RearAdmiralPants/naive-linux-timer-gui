@@ -38,7 +38,9 @@ const int MAX_EDDIES = 8;
 uniform int uEddyCount;
 uniform vec4 uEddyPos[MAX_EDDIES];
 uniform vec4 uEddyColor[MAX_EDDIES];
+uniform vec4 uEddyNova[MAX_EDDIES];  // shock radius, push, flash radiance, reach multiplier
 uniform float uEddyReach;   // distance at which an eddy's light has fallen to half
+uniform float uNovaHeat;    // emission of dust the shock front is passing through
 
 out vec2 vCorner;
 out vec4 vColor;  // premultiplied: rgb already carries the alpha
@@ -111,17 +113,32 @@ void main() {
     // out. Plain inverse-square is not local enough here: the phase function
     // peaks at ~28x for g = 0.75, so a d^-2 tail still lit grains clear across
     // the frame into a field of bokeh discs.
+    vec3 heat = vec3(0.0);
     for (int e = 0; e < uEddyCount; ++e) {
+        vec4 nova = uEddyNova[e];
         float glow = uEddyColor[e].w;
+        // A supernova is the same light, much brighter and much further-
+        // reaching, whitened -- the blast is hotter than the eddy ever was.
+        float reach = uEddyReach * max(1.0, nova.w);
+        vec3 tint = mix(uEddyColor[e].rgb, vec3(1.0), nova.z > 0.0 ? 0.6 : 0.0);
+        glow += nova.z;
         if (glow <= 0.0) continue;
         vec3 fromEddy = pos - uEddyPos[e].xyz;
         float d2 = dot(fromEddy, fromEddy);
-        float lobe = 1.0 / (1.0 + d2 / (uEddyReach * uEddyReach));
+        float lobe = 1.0 / (1.0 + d2 / (reach * reach));
         float falloff = lobe * lobe;
         float cosE = dot(fromEddy * inversesqrt(max(d2, 1e-6)), toEye / eyeDist);
-        scatter += cl.color.rgb * uEddyColor[e].rgb
+        scatter += cl.color.rgb * tint
                  * (glow * falloff * phaseHG(cl.shape.x, cosE) * uBrightness);
+        if (nova.y > 0.0) {
+            // Shock heating: dust inside the front glows on its own account,
+            // independent of albedo -- this is emission, not reflection --
+            // so even the darkest lane lights up as the shell crosses it.
+            float s = (sqrt(d2) - nova.x) / (0.25 + 0.15 * nova.x);
+            heat += mix(uEddyColor[e].rgb, vec3(1.0, 0.85, 0.6), 0.5)
+                  * exp(-s * s) * nova.y * uNovaHeat / 9.0;
+        }
     }
-    vec3 radiance = albedo * (scatter + cl.color.rgb * uAmbient);
+    vec3 radiance = albedo * (scatter + cl.color.rgb * uAmbient) + heat;
     vColor = vec4(radiance * alpha, alpha);
 }

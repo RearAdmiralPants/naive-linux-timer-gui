@@ -11,6 +11,7 @@ uniform int uEddyCount;
 uniform vec4 uEddyPos[MAX_EDDIES];    // w unused here
 uniform vec4 uEddyAxis[MAX_EDDIES];   // xyz axis, w = orbit sign
 uniform vec4 uEddyColor[MAX_EDDIES];  // rgb, w = glow (envelope already applied)
+uniform vec4 uEddyNova[MAX_EDDIES];   // shock radius, push, flash, reach
 uniform mat4 uViewProj;
 uniform vec3 uCamPos;
 uniform vec3 uCamRight;
@@ -23,6 +24,7 @@ out vec2 vUV;          // core: [-1,1]^2; jet: x across [-1,1], y along [0,1]
 flat out int vKind;    // 0 core, 1 jet
 flat out vec4 vColor;  // rgb, w = glow
 flat out float vSeed;
+flat out vec3 vNova;   // x = ring radius in quad units (0 = none), y = flash, z = ring strength
 
 const vec2 CORNERS[6] = vec2[](
     vec2(-1, -1), vec2(1, -1), vec2(1, 1),
@@ -32,9 +34,15 @@ void main() {
     int e = gl_VertexID / 18;
     int part = (gl_VertexID % 18) / 6;
     vec2 c = CORNERS[gl_VertexID % 6];
-    vColor = uEddyColor[min(e, MAX_EDDIES - 1)];
+    int ei = min(e, MAX_EDDIES - 1);
+    vColor = uEddyColor[ei];
+    vec4 nova = uEddyNova[ei];
     vSeed = float(e) * 7.31;
-    if (e >= uEddyCount || vColor.w <= 0.0) {
+    vNova = vec3(0.0);
+    bool exploding = nova.z > 0.0 || nova.y > 0.0;
+    // Jets need pull; the core quad also carries the supernova.
+    bool visible = part == 0 ? (vColor.w > 0.0 || exploding) : vColor.w > 0.0;
+    if (e >= uEddyCount || !visible) {
         gl_Position = vec4(2.0, 2.0, 2.0, 1.0);
         return;
     }
@@ -44,7 +52,14 @@ void main() {
     if (part == 0) {
         vKind = 0;
         vUV = c;
-        world = center + (uCamRight * c.x + uCamUp * c.y) * uCoreSize;
+        float size = uCoreSize;
+        if (exploding) {
+            // Grow the quad to hold the expanding ring with margin, and tell
+            // the fragment shader where the ring is in quad units.
+            size = max(uCoreSize, nova.x * 1.25 + 0.2);
+            vNova = vec3(nova.x / size, nova.z, nova.y);
+        }
+        world = center + (uCamRight * c.x + uCamUp * c.y) * size;
     } else {
         vKind = 1;
         vec3 axis = normalize(uEddyAxis[e].xyz) * (part == 1 ? 1.0 : -1.0);

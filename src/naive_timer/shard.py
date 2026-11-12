@@ -705,6 +705,28 @@ class ShardParams:
     eddy_color_a: tuple = (0.55, 0.75, 1.00)
     eddy_color_b: tuple = (1.00, 0.55, 0.30)
 
+    # Supernova (Type Ia: accrete past a limit, detonate, leave no remnant).
+    # eddy_critical_mass is in cloud-seconds -- one whole cloud held for one
+    # second is 1; 0 disables detonation. Measured over two simulated minutes
+    # at the defaults, eddies accrete anywhere from 0 to ~75 in a lifetime,
+    # so ~30 lets the greedy ones blow and the rest simply fade.
+    # eddy_accretion is how much an eddy's pull (and, 1.5x, its glow) has
+    # grown by the time it reaches critical mass: 0.5 = half again.
+    # nova_flash is the peak radiance of the blast's light and nova_reach
+    # multiplies eddy_reach for it -- this is the brightest thing the scene
+    # ever draws, on purpose. nova_speed is the shock front's initial speed
+    # (units/s, decelerating), nova_kick how hard it shoves the dust it
+    # crosses, nova_cloud_speed how fast captured clouds are thrown clear.
+    eddy_critical_mass: float = 30.0
+    eddy_accretion: float = 0.5
+    nova_duration_s: float = 5.0
+    nova_flash: float = 40.0
+    nova_reach: float = 3.0
+    nova_speed: float = 2.2
+    nova_kick: float = 9.0
+    nova_cloud_speed: float = 0.7
+    nova_heat: float = 3.0
+
 
 def _sky_fragment_source(defines: tuple[str, ...] = ()) -> str:
     """sky.frag with #defines injected straight after its #version line.

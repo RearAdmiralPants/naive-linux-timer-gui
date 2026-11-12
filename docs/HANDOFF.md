@@ -934,6 +934,9 @@ Gotchas found building M1:
 - **PySide6 `QOpenGLBuffer.read` takes `(offset, buffer, count)`**, not `(offset, count)`. `ctx.extraFunctions()` exposes `glDispatchCompute`, `glMemoryBarrier` and `glBindBufferBase`, which is all compute needs.
 - **The dust is fill-bound, not compute-bound**, on the iGPU (`tools/bench_frame.py`): soft sprites blended into the 4× MSAA RGBA16F scene target. Shrinking the sprites recovers almost everything. See TODO for the planned fix.
 - **Stills need `--sim`.** The dust is stateful, so `render_still.py` steps it forward to each time instead of setting it, the way it does for the sway and the shatter.
+- **When the image looks wrong, read the SSBO back before theorising.** Twice in M2 the obvious explanation was wrong, and a ~40-line readback script (per-cloud distance and speed percentiles) found the cause right away: six clouds collapsed onto one eddy, plus a shell of dust wrapped around the camera.
+- **Never `pow()` a negative base in GLSL.** It's undefined, drivers return NaN, and the bloom blur smears one NaN pixel into a black rectangle.
+- **The HG phase function is normalised so isotropic = 1**, which puts the forward peak at ~28× for g = 0.75. Any light that uses it needs a falloff steeper than inverse-square, or it lights the whole frame.
 
 ## Branches
 

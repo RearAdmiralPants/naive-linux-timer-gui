@@ -112,5 +112,65 @@ class EddySetTest(unittest.TestCase):
             self.assertAlmostEqual(a, b, places=3)
 
 
+class SupernovaTest(unittest.TestCase):
+    def setUp(self):
+        self.p = ShardParams()
+        self.es = EddySet(seed=6)
+        self.e = _eddy(life=100.0)
+        self.e.age = _RAMP_S
+        self.es.eddies = [self.e]
+        self.p.eddy_count = 1
+
+    def test_feeding_grows_pull_and_glow(self):
+        before = (self.e.pull(self.p), self.e.glow(self.p))
+        self.e.mass_gained = self.p.eddy_critical_mass * 0.9
+        self.assertGreater(self.e.pull(self.p), before[0])
+        self.assertGreater(self.e.glow(self.p), before[1])
+
+    def test_detonates_at_critical_mass_and_flings_its_clouds(self):
+        cloud = spawn_cloud(random.Random(3), self.p, anywhere=True)
+        cloud.center = [0.3, 0.0, -2.0]
+        cloud.captured_by = id(self.e)
+        self.e.mass_gained = self.p.eddy_critical_mass
+        self.es.step(1 / 60, self.p, [cloud])
+        self.assertIsNotNone(self.e.nova_age)
+        self.assertEqual(self.e.envelope(), 0.0)
+        self.assertIsNone(cloud.captured_by)
+        # Thrown outward, i.e. along +x here, faster than its own drift.
+        self.assertGreater(cloud.vel[0] - cloud.base_vel[0],
+                           0.9 * self.p.nova_cloud_speed)
+        # ... and keeps that throw instead of relaxing straight back.
+        for _ in range(60):
+            self.es.step(1 / 60, self.p, [cloud])
+        self.assertGreater(cloud.vel[0] - cloud.base_vel[0],
+                           0.9 * self.p.nova_cloud_speed)
+
+    def test_blast_shape_and_rebirth(self):
+        self.e.mass_gained = self.p.eddy_critical_mass
+        self.es.step(1 / 60, self.p, [])
+        e = self.e
+        e.nova_age = 0.04
+        rising = e.nova(self.p)[2]
+        e.nova_age = 0.08
+        peak = e.nova(self.p)[2]
+        e.nova_age = 2.0
+        late = e.nova(self.p)
+        self.assertLess(rising, peak)
+        self.assertAlmostEqual(peak, self.p.nova_flash)
+        self.assertLess(late[2], peak * 0.1)
+        self.assertGreater(late[0], 0.0)           # the shell has travelled
+        e.nova_age = e.nova_duration + 0.1
+        self.assertEqual(e.nova(self.p), (0.0, 0.0, 0.0, 0.0))
+        e.nova_age = e.nova_duration + 10.0
+        self.es.step(1 / 60, self.p, [])
+        self.assertIsNot(self.es.eddies[0], e)     # reborn elsewhere
+
+    def test_zero_critical_mass_never_detonates(self):
+        self.p.eddy_critical_mass = 0.0
+        self.e.mass_gained = 1e6
+        self.es.step(1 / 60, self.p, [])
+        self.assertIsNone(self.e.nova_age)
+
+
 if __name__ == "__main__":
     unittest.main()

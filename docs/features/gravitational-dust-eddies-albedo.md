@@ -48,3 +48,5 @@ Other opinions or oversights I'm making are welcome. Please point them out.
 **Git.** Commit and push on this branch at my discretion. Merging to main requires the user's smoke test, a summary from me, and the user's signoff.
 
 **Milestones.** M0 harness + gate · M1 drifting dust · M2 eddies + captured orbits · M3 fade, release, re-clump · M4 Ia supernova · M5 panel + presets. Post-MVP, high priority: shatter fragments caught by eddies.
+
+**Status (2026-11-12).** M0–M4 done and pushed. M5's panel sections are done; the presets don't need changes (old JSON loads with the defaults, which have dust and eddies on). Not yet seen live on a real display by the user. Measured at 1080p: the RTX 3050 doesn't notice it; Intel UHD runs ~30 fps, fill-bound (see TODO, hotspot #1). Subagent use: one Sonnet agent, three bounded tuning-panel tasks, all merged unchanged after review.

@@ -233,6 +233,15 @@ _EDDY_SLIDERS = [
     ("eddy_jet_length", 0.0, 6.0),
     ("eddy_jet_width", 0.02, 1.0),
     ("eddy_jet_speed", 0.0, 4.0),
+    ("eddy_critical_mass", 0.0, 150.0),
+    ("eddy_accretion", 0.0, 3.0),
+    ("nova_duration_s", 0.5, 15.0),
+    ("nova_flash", 0.0, 150.0),
+    ("nova_reach", 1.0, 8.0),
+    ("nova_speed", 0.2, 8.0),
+    ("nova_kick", 0.0, 30.0),
+    ("nova_cloud_speed", 0.0, 3.0),
+    ("nova_heat", 0.0, 10.0),
 ]
 
 _CAMERA_SLIDERS = [

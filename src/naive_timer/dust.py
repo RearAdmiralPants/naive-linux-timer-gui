@@ -87,6 +87,7 @@ class Cloud:
     base_vel: tuple = (0.0, 0.0, 0.0)  # the drift it was born with
     captured_by: int | None = None     # id() of the eddy holding it, if any
     capture: float = 0.0               # 0..1, how firmly
+    flung: float = 0.0                 # seconds left coasting after a supernova
 
     def pack(self) -> list:
         fade = min(1.0, self.age / _FADE_IN_S)
@@ -375,12 +376,12 @@ class DustField:
         eddies = self.eddies.eddies
         prog.setUniformValue1i(loc("uEddyCount"), len(eddies))
         for i, e in enumerate(eddies[:MAX_EDDIES]):
-            env = e.envelope()
             prog.setUniformValue(loc(f"uEddyPos[{i}]"),
-                                 QVector4D(*e.pos, params.eddy_mass * env))
+                                 QVector4D(*e.pos, e.pull(params)))
             prog.setUniformValue(loc(f"uEddyAxis[{i}]"), QVector4D(*e.axis, e.spin))
             prog.setUniformValue(loc(f"uEddyColor[{i}]"),
-                                 QVector4D(*e.color, params.eddy_glow * env))
+                                 QVector4D(*e.color, e.glow(params)))
+            prog.setUniformValue(loc(f"uEddyNova[{i}]"), QVector4D(*e.nova(params)))
 
     @staticmethod
     def _matrices(camera, aspect, fov_degrees):
@@ -434,6 +435,7 @@ class DustField:
         loc = prog.uniformLocation
         self._set_eddies(prog, params)
         prog.setUniformValue1f(loc("uEddyReach"), float(params.eddy_reach))
+        prog.setUniformValue1f(loc("uNovaHeat"), float(params.nova_heat))
         prog.setUniformValue(loc("uViewProj"), view_proj)
         prog.setUniformValue(loc("uCamPos"), eye)
         prog.setUniformValue(loc("uCamRight"), right)

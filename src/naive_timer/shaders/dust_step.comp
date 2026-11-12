@@ -44,6 +44,9 @@ const int MAX_EDDIES = 8;
 uniform int uEddyCount;
 uniform vec4 uEddyPos[MAX_EDDIES];
 uniform vec4 uEddyAxis[MAX_EDDIES];
+// Supernova per eddy: x = shock radius, y = push, z/w (flash, reach) are for
+// the lighting. y == 0 means no blast in progress.
+uniform vec4 uEddyNova[MAX_EDDIES];
 uniform float uEddyCapture;    // capture radius, scene units
 uniform float uEddySoftening;  // gravity softening length
 uniform float uEddyLock;       // 1/s: how hard captured dust is steered onto its orbit
@@ -133,6 +136,18 @@ void main() {
                             hash(i * 3u + 103u)) - 0.5;
         float orbitR = uEddyOrbit * (0.35 + 0.65 * hash(i * 3u + 104u));
         for (int e = 0; e < uEddyCount; ++e) {
+            vec4 nova = uEddyNova[e];
+            if (nova.y > 0.0) {
+                // The shock: a radial shove concentrated in a shell around
+                // the front, which widens as it travels. Dust it has already
+                // passed is left coasting outward, dust it has not reached
+                // yet is untouched -- which is what makes the front visible.
+                vec3 rel = x - uEddyPos[e].xyz;
+                float r = max(length(rel), 1e-3);
+                float w = 0.25 + 0.15 * nova.x;
+                float s = (r - nova.x) / w;
+                gravity += rel / r * nova.y * exp(-s * s);
+            }
             float pull = uEddyPos[e].w;
             if (pull <= 0.0) continue;
             vec3 rel = x - uEddyPos[e].xyz;

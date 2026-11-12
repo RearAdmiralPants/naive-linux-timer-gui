@@ -7,6 +7,7 @@ in vec2 vUV;
 flat in int vKind;
 flat in vec4 vColor;
 flat in float vSeed;
+flat in vec3 vNova;
 out vec4 FragColor;
 
 uniform float uTime;
@@ -24,6 +25,20 @@ void main() {
         // by the bloom blur. Square by multiplying.
         float r = length(vUV);
         if (r > 1.0) discard;
+        if (vNova.y > 0.0 || vNova.z > 0.0) {
+            // Supernova: a blinding white flash at the centre and a thin,
+            // hot, slightly ragged shell racing outward. Ragged because a
+            // perfect circle reads as a UI element, not an explosion.
+            float flash = exp(-r * r * 9.0) * vNova.y * 0.12;
+            float ang = atan(vUV.y, vUV.x);
+            float rag = 0.03 * sin(ang * 7.0 + vSeed) + 0.02 * sin(ang * 13.0 - vSeed * 2.0);
+            float d = (r - vNova.x - rag) * 22.0;
+            float shell = exp(-d * d) * vNova.z * 0.6;
+            vec3 hot = vec3(1.0, 0.92, 0.8);
+            vec3 col = hot * flash + mix(vColor.rgb, hot, 0.5) * shell;
+            FragColor = vec4(max(col, 0.0), 0.0);
+            return;
+        }
         float core = exp(-r * r * 220.0) * 10.0;
         float halo = exp(-r * r * 18.0) * 0.25;
         float ringD = (r - 0.30 - 0.02 * sin(uTime * 3.0 + vSeed)) * 30.0;

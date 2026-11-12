@@ -53,8 +53,14 @@ On the alert, after the shatter:
   the tab bar stay as they are. Widen it if the pulse needs to be louder.
 
 Dust & eddies (feat/gravitational-dust-eddies-albedo; see docs/features/):
-- In progress: M2-M5 per the feature doc
+- v0 candidate (M1-M4 + panel) awaiting the user's live look; tune on the real display
 - HIGH PRIORITY post-MVP: shatter fragments caught in eddy orbits
+- Supernova light on the glass: the flash lights dust but not the shard yet
+  (the spark-light slots in shard.frag are the obvious way in)
+- Nova frequency: at defaults, about one early nova then a long gap (seeded
+  run: t=20 s, then t=178 s). Fine-tune eddy_critical_mass / cloud pull live
+- Stretch goals from the feature doc: refraction of dust through the
+  shard; crepuscular rays
 - Perf hotspot #1: dust is fill-bound on the iGPU (1080p: 15.4 -> 33.9 ms;
   tiny grains -> 17.1 ms, so ~1.7 ms is sim+vertex). Render dust to a
   half-res non-MSAA target and composite. NVIDIA 3050: no measurable cost.

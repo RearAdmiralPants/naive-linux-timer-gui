@@ -45,10 +45,14 @@ class Eddy:
     fade: float          # seconds to lose it
     spin: float          # +1 / -1: which way the orbit turns about the axis
     age: float = 0.0
-    mass_gained: float = 0.0   # dust accreted, in cloud-seconds (M4 uses it)
+    mass_gained: float = 0.0   # dust accreted, in cloud-seconds
+    nova_age: float | None = None  # seconds since it went supernova, if it has
+    nova_duration: float = 5.0
 
     def envelope(self) -> float:
         """0..1 strength: ramp up, hold, fade out ("losing pull")."""
+        if self.nova_age is not None:
+            return 0.0  # a supernova leaves nothing behind to pull with
         if self.age < _RAMP_S:
             return self.age / _RAMP_S
         over = self.age - _RAMP_S - self.life
@@ -62,7 +66,46 @@ class Eddy:
 
     @property
     def dead(self) -> bool:
+        if self.nova_age is not None:
+            return self.nova_age > self.nova_duration + _REST_S
         return self.age > _RAMP_S + self.life + self.fade + _REST_S
+
+    def feed(self, params) -> float:
+        """0..1: how close accretion has brought it to critical mass."""
+        return min(1.0, self.mass_gained / max(params.eddy_critical_mass, 1e-3))
+
+    def pull(self, params) -> float:
+        """Physics strength: base mass, grown by what it has swallowed."""
+        return (params.eddy_mass * self.envelope()
+                * (1.0 + params.eddy_accretion * self.feed(params)))
+
+    def glow(self, params) -> float:
+        """Artwork/light strength. Brightens as it feeds -- the tell that it
+        is close to going off."""
+        return (params.eddy_glow * self.envelope()
+                * (1.0 + 1.5 * params.eddy_accretion * self.feed(params)))
+
+    def nova(self, params) -> tuple:
+        """(shell radius, push, flash radiance, light-reach multiplier).
+
+        All zeros unless it has gone off. The flash is a step (80 ms attack)
+        then an exponential decay -- the shape of the light curve, compressed
+        from weeks into seconds. The shell decelerates as it sweeps up dust.
+        """
+        if self.nova_age is None:
+            return (0.0, 0.0, 0.0, 0.0)
+        t, dur = self.nova_age, self.nova_duration
+        if t > dur:
+            return (0.0, 0.0, 0.0, 0.0)
+        u = t / dur
+        radius = params.nova_speed * t * (1.0 - 0.35 * u)
+        push = params.nova_kick * (1.0 - u) ** 2
+        attack = 0.08
+        if t < attack:
+            flash = params.nova_flash * t / attack
+        else:
+            flash = params.nova_flash * math.exp(-(t - attack) * 1.4)
+        return (radius, push, flash, params.nova_reach)
 
 
 def spawn_eddy(rng: random.Random, params, others=()) -> Eddy:
@@ -112,11 +155,41 @@ class EddySet:
         self.sync_count(params)
         for i, e in enumerate(self.eddies):
             e.age += dt
+            if e.nova_age is not None:
+                e.nova_age += dt
+            elif (params.eddy_critical_mass > 0
+                    and e.mass_gained >= params.eddy_critical_mass):
+                self._detonate(e, params, clouds)
             if e.dead:
                 self.eddies[i] = spawn_eddy(
                     self._rng, params, self.eddies[:i] + self.eddies[i + 1:]
                 )
         self._capture(dt, params, clouds)
+
+    def _detonate(self, e: Eddy, params, clouds) -> None:
+        """Type Ia: accreted past the limit, it goes off and leaves no remnant.
+
+        Every cloud it was holding is thrown straight outward. The shock in
+        dust_step.comp scatters the particles; this sends their *homes* the
+        same way, so once the blast has passed, cohesion re-clumps each cloud
+        well clear of the site and it drifts on -- the dust restarts its
+        journey rather than falling back into the hole.
+        """
+        e.nova_age = 0.0
+        e.nova_duration = params.nova_duration_s
+        for c in clouds:
+            if c.captured_by != id(e):
+                continue
+            out = [c.center[k] - e.pos[k] for k in range(3)]
+            n = math.sqrt(sum(v * v for v in out))
+            if n < 1e-3:
+                out = [self._rng.gauss(0, 1) for _ in range(3)]
+                n = math.sqrt(sum(v * v for v in out)) or 1.0
+            for k in range(3):
+                c.vel[k] = c.base_vel[k] + out[k] / n * params.nova_cloud_speed
+            c.captured_by = None
+            c.capture = 0.0
+            c.flung = params.nova_duration_s  # keep the throw; see _capture
 
     def _capture(self, dt: float, params, clouds) -> None:
         """Pull whole clouds toward eddies; release them when the pull fades."""
@@ -154,6 +227,10 @@ class EddySet:
                     c.vel[k] = c.base_vel[k] + self._rng.uniform(-kick, kick)
                 c.captured_by = None
                 c.capture = 0.0
+            elif c.flung > 0.0:
+                # Thrown by a supernova: coast, or the relaxation below would
+                # cancel the throw within a second.
+                c.flung -= dt
             else:
                 # Free: relax back toward the drift it was born with (a
                 # partial capture that never completed leaves a residue).
