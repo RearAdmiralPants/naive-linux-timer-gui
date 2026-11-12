@@ -33,6 +33,13 @@ uniform float uOpacity;     // per-sprite opacity before the cloud's own scale
 uniform float uBrightness;  // multiplier on scattered light
 uniform float uAmbient;     // faint omnidirectional fill, so unlit dust is not pure black
 
+// Eddies as lights. color.w = radiance (glow * envelope); 0 = dark.
+const int MAX_EDDIES = 8;
+uniform int uEddyCount;
+uniform vec4 uEddyPos[MAX_EDDIES];
+uniform vec4 uEddyColor[MAX_EDDIES];
+uniform float uEddyReach;   // distance at which an eddy's light has fallen to half
+
 out vec2 vCorner;
 out vec4 vColor;  // premultiplied: rgb already carries the alpha
 
@@ -86,11 +93,35 @@ void main() {
 
     float albedo = cl.color.w;
     // Sprites that drift right up to the lens would cover the frame in one
-    // smear; fade them out before they get there.
-    float nearFade = smoothstep(0.25, 1.1, eyeDist);
+    // smear; fade them out before they get there. Generous on purpose: a
+    // grain 1.5 units from the eye is already a soft disc a tenth of the
+    // frame wide, and a cloud's worth of those reads as bokeh, not dust.
+    float nearFade = smoothstep(0.8, 2.5, eyeDist);
     float alpha = clamp(uOpacity * cl.shape.z * cl.extra.x * nearFade, 0.0, 1.0);
 
     vec3 scatter = cl.color.rgb * uLightColor * (uLightIntensity * phase * uBrightness);
+
+    // Each eddy lights the dust around it, through the same phase function:
+    // with forward-scattering dust, the grains between the eddy and the eye
+    // blaze and the ones beyond it barely show -- which is what gives an
+    // accretion torus a bright near side and a lit rim rather than a uniform
+    // glowing donut.
+    //
+    // The falloff is the *square* of a 1/(1 + d^2/R^2) lobe, i.e. ~d^-4 far
+    // out. Plain inverse-square is not local enough here: the phase function
+    // peaks at ~28x for g = 0.75, so a d^-2 tail still lit grains clear across
+    // the frame into a field of bokeh discs.
+    for (int e = 0; e < uEddyCount; ++e) {
+        float glow = uEddyColor[e].w;
+        if (glow <= 0.0) continue;
+        vec3 fromEddy = pos - uEddyPos[e].xyz;
+        float d2 = dot(fromEddy, fromEddy);
+        float lobe = 1.0 / (1.0 + d2 / (uEddyReach * uEddyReach));
+        float falloff = lobe * lobe;
+        float cosE = dot(fromEddy * inversesqrt(max(d2, 1e-6)), toEye / eyeDist);
+        scatter += cl.color.rgb * uEddyColor[e].rgb
+                 * (glow * falloff * phaseHG(cl.shape.x, cosE) * uBrightness);
+    }
     vec3 radiance = albedo * (scatter + cl.color.rgb * uAmbient);
     vColor = vec4(radiance * alpha, alpha);
 }

@@ -664,6 +664,47 @@ class ShardParams:
     dust_turbulence: float = 0.25
     dust_swirl: float = 0.12
 
+    # Gravitational eddies (eddies.py; physics in dust_step.comp). They need
+    # the dust to be on: an eddy is drawn and simulated by the dust field.
+    #
+    # eddy_mass is the pull (G*M, scene units^3/s^2). Inside
+    # eddy_capture_radius, dust is steered onto an orbit at eddy_lock (1/s;
+    # low = loose, sloppy capture with more slingshots, high = orderly); each
+    # grain orbits a copy of the spin axis tilted by up to eddy_tilt (0 = one
+    # clean disk, ~1 = a ball), and eddy_flatten pulls it toward that plane.
+    # eddy_cloud_pull is how hard a whole cloud is dragged onto an eddy (so
+    # captured dust has somewhere to "belong"); eddy_release_kick is the speed
+    # it is thrown off with when the pull fades.
+    #
+    # An eddy lives eddy_life_min..max seconds at full pull, then takes
+    # eddy_fade_s to lose it -- dimming, and letting its dust go -- before it
+    # is reborn somewhere else. eddy_glow drives both its artwork and how
+    # brightly it lights nearby dust; eddy_reach is where that light has
+    # fallen to half.
+    eddies_enabled: bool = True
+    eddy_count: float = 2.0
+    eddy_mass: float = 0.6
+    eddy_capture_radius: float = 1.8
+    eddy_softening: float = 0.25
+    eddy_lock: float = 1.4
+    eddy_flatten: float = 0.8
+    eddy_tilt: float = 0.45
+    eddy_orbit_radius: float = 1.0     # captured dust orbits at 35-100% of this
+    eddy_orbit_speed: float = 1.0      # x the Keplerian speed for eddy_mass
+    eddy_cloud_pull: float = 0.35
+    eddy_release_kick: float = 0.25
+    eddy_life_min: float = 20.0
+    eddy_life_max: float = 45.0
+    eddy_fade_s: float = 6.0
+    eddy_glow: float = 2.0
+    eddy_reach: float = 0.9
+    eddy_core_size: float = 0.35
+    eddy_jet_length: float = 2.2
+    eddy_jet_width: float = 0.30
+    eddy_jet_speed: float = 1.0
+    eddy_color_a: tuple = (0.55, 0.75, 1.00)
+    eddy_color_b: tuple = (1.00, 0.55, 0.30)
+
 
 def _sky_fragment_source(defines: tuple[str, ...] = ()) -> str:
     """sky.frag with #defines injected straight after its #version line.

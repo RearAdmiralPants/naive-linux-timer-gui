@@ -38,6 +38,20 @@ uniform float uCohesion;    // spring constant toward home, 1/s^2
 uniform float uDrag;        // damping of velocity relative to the cloud, 1/s
 uniform float uTurbulence;  // strength of the stirring field, units/s^2
 
+// Eddies (eddies.py). pos.w = pull (mass * envelope; 0 = absent or spent),
+// axis.w = orbit direction (+-1).
+const int MAX_EDDIES = 8;
+uniform int uEddyCount;
+uniform vec4 uEddyPos[MAX_EDDIES];
+uniform vec4 uEddyAxis[MAX_EDDIES];
+uniform float uEddyCapture;    // capture radius, scene units
+uniform float uEddySoftening;  // gravity softening length
+uniform float uEddyLock;       // 1/s: how hard captured dust is steered onto its orbit
+uniform float uEddyFlatten;    // spring toward the orbital plane, 1/s^2
+uniform float uEddyTilt;       // per-particle spread of orbital planes, 0 = one clean disk
+uniform float uEddyOrbit;      // outer orbital radius; each grain picks 35-100% of it
+uniform float uEddyOrbitSpeed; // multiplier on the Keplerian speed at that radius
+
 // Integer hash -> [0,1). Stable across drivers, unlike sin-based hashes.
 float hash(uint x) {
     x ^= x >> 16; x *= 0x7feb352du;
@@ -94,9 +108,60 @@ void main() {
         p.pos = vec4(home, cl.vel.w);
         p.vel = vec4(cl.vel.xyz, 0.0);
     } else {
-        vec3 accel = (home - p.pos.xyz) * uCohesion
-                   - (p.vel.xyz - cl.vel.xyz) * uDrag
-                   + stir(p.pos.xyz + float(seed) * 0.37, uTime) * uTurbulence;
+        // Eddies. Free dust feels plain softened gravity (what makes fast
+        // dust slingshot past instead of being caught). Captured dust is
+        // *steered onto a prescribed orbit* instead: each grain has its own
+        // radius (35-100% of uEddyOrbit) and its own copy of the spin axis,
+        // tilted by up to uEddyTilt, and is pulled toward three things at
+        // once -- the orbital speed, its radius, and its plane.
+        //
+        // Prescribed rather than emergent on purpose. The first version only
+        // steered the *velocity* and let gravity do the rest, and measured
+        // (particle readback) it did two bad things: dust spiralled into a
+        // ball the size of the softening length, and grains on tilted planes
+        // were flung to the capture edge where the cohesion spring held them
+        // in a shell -- which, wrapped round the camera's line of sight,
+        // filled the frame with giant out-of-focus sprites. Springs to a
+        // radius and a plane give a torus whose size is a parameter.
+        vec3 x = p.pos.xyz;
+        vec3 v = p.vel.xyz;
+        vec3 gravity = vec3(0.0);
+        vec3 steer = vec3(0.0);
+        vec3 steerV = vec3(0.0);
+        float capture = 0.0;
+        vec3 tiltRnd = vec3(hash(i * 3u + 101u), hash(i * 3u + 102u),
+                            hash(i * 3u + 103u)) - 0.5;
+        float orbitR = uEddyOrbit * (0.35 + 0.65 * hash(i * 3u + 104u));
+        for (int e = 0; e < uEddyCount; ++e) {
+            float pull = uEddyPos[e].w;
+            if (pull <= 0.0) continue;
+            vec3 rel = x - uEddyPos[e].xyz;
+            float r2 = dot(rel, rel) + uEddySoftening * uEddySoftening;
+            float r = sqrt(r2);
+            float c = smoothstep(uEddyCapture, uEddyCapture * 0.6, r)
+                    * min(pull, 1.0);
+            gravity -= (1.0 - c) * pull * rel / (r2 * r);
+            if (c <= 0.0) continue;
+
+            vec3 axis = normalize(uEddyAxis[e].xyz + tiltRnd * uEddyTilt);
+            float h = dot(rel, axis);
+            vec3 inPlane = rel - h * axis;
+            float rho = length(inPlane);
+            if (rho < 1e-3) continue;   // on the axis itself: no orbit defined
+            vec3 radial = inPlane / rho;
+            vec3 tangent = cross(axis, radial);
+            float vt = sqrt(pull / orbitR) * uEddyOrbitSpeed * uEddyAxis[e].w;
+            steerV += c * tangent * vt;
+            steer += c * (radial * (orbitR - rho) * 2.0 - axis * h * uEddyFlatten);
+            capture = max(capture, c);
+        }
+        float free_ = 1.0 - capture;
+        // The drag target blends from "move with the cloud" to "orbit".
+        vec3 targetV = cl.vel.xyz * free_ + steerV;
+        vec3 accel = (home - x) * uCohesion * free_
+                   - (v - targetV) * mix(uDrag, uEddyLock, capture)
+                   + gravity + steer
+                   + stir(x + float(seed) * 0.37, uTime) * uTurbulence;
         p.vel.xyz += accel * uDt;
         p.pos.xyz += p.vel.xyz * uDt;
     }

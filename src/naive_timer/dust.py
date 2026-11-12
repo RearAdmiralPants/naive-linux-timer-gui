@@ -28,11 +28,13 @@ import struct
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from PySide6.QtGui import QMatrix4x4, QVector3D
+from PySide6.QtGui import QMatrix4x4, QVector3D, QVector4D
 from PySide6.QtOpenGL import QOpenGLBuffer, QOpenGLShader, QOpenGLShaderProgram
 
+from .eddies import MAX_EDDIES, EddySet
+
 _SHADER_DIR = Path(__file__).parent / "shaders"
-SHADER_FILES = ("dust_step.comp", "dust.vert", "dust.frag")
+SHADER_FILES = ("dust_step.comp", "dust.vert", "dust.frag", "eddy.vert", "eddy.frag")
 
 _GL_TRIANGLES = 0x0004
 _GL_BLEND = 0x0BE2
@@ -62,7 +64,7 @@ _MAX_LIVE_STEPS = 6
 # X is the drift axis: clouds enter at one side and leave at the other.
 BOUNDS_X = 7.5
 BOUNDS_Y = 4.0
-BOUNDS_Z = (-9.0, 1.8)
+BOUNDS_Z = (-9.0, 0.8)
 # How long a freshly spawned cloud takes to fade in. Spawns happen off-frame,
 # but the first population at startup does not.
 _FADE_IN_S = 2.5
@@ -71,7 +73,7 @@ _FADE_IN_S = 2.5
 @dataclass
 class Cloud:
     center: list
-    vel: tuple
+    vel: list            # current drift; eddies bend it (eddies.py)
     radius: float
     albedo: float
     aniso: float
@@ -82,6 +84,9 @@ class Cloud:
     swirl: float
     generation: int = 1
     age: float = 0.0
+    base_vel: tuple = (0.0, 0.0, 0.0)  # the drift it was born with
+    captured_by: int | None = None     # id() of the eddy holding it, if any
+    capture: float = 0.0               # 0..1, how firmly
 
     def pack(self) -> list:
         fade = min(1.0, self.age / _FADE_IN_S)
@@ -90,7 +95,7 @@ class Cloud:
             *self.vel, float(self.generation),
             *self.color, self.albedo,
             self.aniso, self.fraction, self.opacity, float(self.seed),
-            fade, self.swirl, 0.0, 0.0,
+            fade, self.swirl, self.capture, 0.0,
         ]
 
 
@@ -133,7 +138,8 @@ def spawn_cloud(rng: random.Random, params, *, anywhere: bool,
     )
     return Cloud(
         center=center,
-        vel=vel,
+        vel=list(vel),
+        base_vel=vel,
         radius=radius,
         albedo=_span(rng, params.dust_albedo_min, params.dust_albedo_max),
         aniso=_span(rng, params.dust_aniso_min, params.dust_aniso_max),
@@ -213,11 +219,13 @@ class DustField:
         self.available = False
         self.error = ""
         self.clouds = CloudSet(seed=seed)
+        self.eddies = EddySet(seed=seed + 10)
         self._pending = 0.0
         self._unbounded = False
         self._time = 0.0
         self._step_prog: QOpenGLShaderProgram | None = None
         self._draw_prog: QOpenGLShaderProgram | None = None
+        self._eddy_prog: QOpenGLShaderProgram | None = None
         self._particles: QOpenGLBuffer | None = None
         self._cloud_buf: QOpenGLBuffer | None = None
         self._per_cloud = 0
@@ -253,12 +261,18 @@ class DustField:
         ) and draw.addShaderFromSourceFile(
             QOpenGLShader.Fragment, str(_SHADER_DIR / "dust.frag")
         ) and draw.link()
+        eddy = QOpenGLShaderProgram()
+        ok = ok and eddy.addShaderFromSourceFile(
+            QOpenGLShader.Vertex, str(_SHADER_DIR / "eddy.vert")
+        ) and eddy.addShaderFromSourceFile(
+            QOpenGLShader.Fragment, str(_SHADER_DIR / "eddy.frag")
+        ) and eddy.link()
         if not ok:
             # Keep the previous programs on a bad hot-reload edit.
-            self.error = (step.log() + draw.log()).strip()
+            self.error = (step.log() + draw.log() + eddy.log()).strip()
             print(f"[dust] shader error:\n{self.error}")
             return self._step_prog is not None
-        self._step_prog, self._draw_prog = step, draw
+        self._step_prog, self._draw_prog, self._eddy_prog = step, draw, eddy
         print("[dust] shaders reloaded")
         return True
 
@@ -315,6 +329,7 @@ class DustField:
         prog = self._step_prog
         for _ in range(steps):
             self.clouds.step(_STEP_S, params)
+            self.eddies.step(_STEP_S, params, self.clouds.clouds)
             self._time += _STEP_S
             self._upload_clouds()
             prog.bind()
@@ -322,19 +337,90 @@ class DustField:
                 ("uDt", _STEP_S), ("uTime", self._time),
                 ("uCohesion", params.dust_cohesion), ("uDrag", params.dust_drag),
                 ("uTurbulence", params.dust_turbulence),
+                ("uEddyCapture", params.eddy_capture_radius),
+                ("uEddySoftening", params.eddy_softening),
+                ("uEddyLock", params.eddy_lock),
+                ("uEddyFlatten", params.eddy_flatten),
+                ("uEddyTilt", params.eddy_tilt),
+                ("uEddyOrbit", params.eddy_orbit_radius),
+                ("uEddyOrbitSpeed", params.eddy_orbit_speed),
             ):
                 prog.setUniformValue1f(prog.uniformLocation(name), float(value))
             prog.setUniformValue1i(prog.uniformLocation("uPerCloud"), per_cloud)
             prog.setUniformValue1i(prog.uniformLocation("uCloudCount"),
                                    len(self.clouds.clouds))
+            self._set_eddies(prog, params)
             ef.glDispatchCompute(groups, 1, 1)
             ef.glMemoryBarrier(_GL_SHADER_STORAGE_BARRIER_BIT)
         if steps == 0:
             self._upload_clouds()  # a count change must still reach the draw
-        if not self.clouds.clouds:
-            return
 
-        self._draw(fns, vao, params, camera, aspect, fov_degrees, per_cloud)
+        view_proj, eye, right, up = self._matrices(camera, aspect, fov_degrees)
+        # Eddies first, dust over them: low-albedo dust in front of a jet
+        # should be able to blot it out, which "over" blending only does for
+        # what is already in the buffer.
+        if self.eddies.eddies:
+            self._draw_eddies(fns, vao, params, view_proj, eye, right, up)
+        if self.clouds.clouds:
+            self._draw(fns, vao, params, view_proj, eye, right, up, per_cloud)
+
+    def _set_eddies(self, prog, params) -> None:
+        """Eddy uniform arrays, shared by all three programs.
+
+        pos.w is the *pull* (mass x envelope) the physics wants; color.w the
+        *glow* the lights and artwork want. Both fall to zero as an eddy
+        loses its pull, which is what makes the fade read as one event.
+        """
+        loc = prog.uniformLocation
+        eddies = self.eddies.eddies
+        prog.setUniformValue1i(loc("uEddyCount"), len(eddies))
+        for i, e in enumerate(eddies[:MAX_EDDIES]):
+            env = e.envelope()
+            prog.setUniformValue(loc(f"uEddyPos[{i}]"),
+                                 QVector4D(*e.pos, params.eddy_mass * env))
+            prog.setUniformValue(loc(f"uEddyAxis[{i}]"), QVector4D(*e.axis, e.spin))
+            prog.setUniformValue(loc(f"uEddyColor[{i}]"),
+                                 QVector4D(*e.color, params.eddy_glow * env))
+
+    @staticmethod
+    def _matrices(camera, aspect, fov_degrees):
+        eye, right, up, _forward = camera
+        view = QMatrix4x4()
+        view.lookAt(eye, QVector3D(0, 0, 0), QVector3D(0, 1, 0))
+        proj = QMatrix4x4()
+        proj.perspective(fov_degrees, aspect, 0.1, 100.0)
+        return proj * view, eye, right, up
+
+    def _draw_eddies(self, fns, vao, params, view_proj, eye, right, up) -> None:
+        prog = self._eddy_prog
+        prog.bind()
+        loc = prog.uniformLocation
+        prog.setUniformValue(loc("uViewProj"), view_proj)
+        prog.setUniformValue(loc("uCamPos"), eye)
+        prog.setUniformValue(loc("uCamRight"), right)
+        prog.setUniformValue(loc("uCamUp"), up)
+        for name, value in (
+            ("uTime", self._time),
+            ("uCoreSize", params.eddy_core_size),
+            ("uJetLength", params.eddy_jet_length),
+            ("uJetWidth", params.eddy_jet_width),
+            ("uJetSpeed", params.eddy_jet_speed),
+        ):
+            prog.setUniformValue1f(loc(name), float(value))
+        self._set_eddies(prog, params)
+        fns.glDisable(_GL_DEPTH_TEST)
+        fns.glDepthMask(_GL_FALSE)
+        fns.glEnable(_GL_BLEND)
+        # Same premultiplied func as the dust; the eddy shader writes alpha 0,
+        # which makes it purely additive -- emission blocks nothing.
+        fns.glBlendFunc(_GL_ONE, _GL_ONE_MINUS_SRC_ALPHA)
+        vao.bind()
+        fns.glDrawArrays(_GL_TRIANGLES, 0, 18 * len(self.eddies.eddies))
+        vao.release()
+        fns.glBlendFunc(_GL_SRC_ALPHA, _GL_ONE_MINUS_SRC_ALPHA)
+        fns.glDepthMask(_GL_TRUE)
+        fns.glEnable(_GL_DEPTH_TEST)
+        prog.release()
 
     def _upload_clouds(self) -> None:
         data = self.clouds.pack()
@@ -342,17 +428,13 @@ class DustField:
         self._cloud_buf.allocate(data, len(data))
         self._cloud_buf.release()
 
-    def _draw(self, fns, vao, params, camera, aspect, fov_degrees, per_cloud) -> None:
-        eye, right, up, _forward = camera
-        view = QMatrix4x4()
-        view.lookAt(eye, QVector3D(0, 0, 0), QVector3D(0, 1, 0))
-        proj = QMatrix4x4()
-        proj.perspective(fov_degrees, aspect, 0.1, 100.0)
-
+    def _draw(self, fns, vao, params, view_proj, eye, right, up, per_cloud) -> None:
         prog = self._draw_prog
         prog.bind()
         loc = prog.uniformLocation
-        prog.setUniformValue(loc("uViewProj"), proj * view)
+        self._set_eddies(prog, params)
+        prog.setUniformValue1f(loc("uEddyReach"), float(params.eddy_reach))
+        prog.setUniformValue(loc("uViewProj"), view_proj)
         prog.setUniformValue(loc("uCamPos"), eye)
         prog.setUniformValue(loc("uCamRight"), right)
         prog.setUniformValue(loc("uCamUp"), up)

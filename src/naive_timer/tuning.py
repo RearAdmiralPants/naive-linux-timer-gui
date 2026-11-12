@@ -212,6 +212,29 @@ _DUST_SLIDERS = [
     ("dust_swirl", 0.0, 1.0),
 ]
 
+_EDDY_SLIDERS = [
+    ("eddy_count", 0.0, 8.0, 1),
+    ("eddy_mass", 0.0, 3.0),
+    ("eddy_capture_radius", 0.2, 4.0),
+    ("eddy_softening", 0.05, 1.0),
+    ("eddy_lock", 0.0, 6.0),
+    ("eddy_flatten", 0.0, 4.0),
+    ("eddy_tilt", 0.0, 1.5),
+    ("eddy_orbit_radius", 0.1, 3.0),
+    ("eddy_orbit_speed", 0.0, 3.0),
+    ("eddy_cloud_pull", 0.0, 2.0),
+    ("eddy_release_kick", 0.0, 1.5),
+    ("eddy_life_min", 2.0, 120.0),
+    ("eddy_life_max", 2.0, 120.0),
+    ("eddy_fade_s", 0.5, 20.0),
+    ("eddy_glow", 0.0, 10.0),
+    ("eddy_reach", 0.1, 4.0),
+    ("eddy_core_size", 0.05, 1.5),
+    ("eddy_jet_length", 0.0, 6.0),
+    ("eddy_jet_width", 0.02, 1.0),
+    ("eddy_jet_speed", 0.0, 4.0),
+]
+
 _CAMERA_SLIDERS = [
     ("orbit_speed", 0.0, 0.8),
     ("sway_degrees", 0.0, 180.0),   # 180 = a full orbit; the numerals turn away
@@ -318,6 +341,7 @@ class TuningPanel(QWidget):
         right.addWidget(self._slider_group("Camera", _CAMERA_SLIDERS))
         right.addWidget(self._slider_group("Sky", _SKY_SLIDERS))
         right.addWidget(self._build_dust_group())
+        right.addWidget(self._build_eddy_group())
         right.addWidget(self._slider_group("Shatter", _SHATTER_SLIDERS))
         right.addWidget(self._slider_group("Tonemap and glare", _POST_SLIDERS))
 
@@ -457,6 +481,28 @@ class TuningPanel(QWidget):
     def _on_dust_enabled(self, checked: bool) -> None:
         self._set("dust_enabled", checked)
 
+    def _build_eddy_group(self) -> QGroupBox:
+        box = self._slider_group("Eddies", _EDDY_SLIDERS)
+        form = box.layout()
+
+        self._eddies_enabled = QCheckBox()
+        self._eddies_enabled.setChecked(self._params.eddies_enabled)
+        self._eddies_enabled.toggled.connect(self._on_eddies_enabled)
+        form.insertRow(0, "enabled", self._eddies_enabled)
+
+        self._eddy_a = _HexColorEdit(
+            self._params.eddy_color_a, lambda c: self._set("eddy_color_a", c)
+        )
+        form.addRow("eddy A", self._eddy_a)
+        self._eddy_b = _HexColorEdit(
+            self._params.eddy_color_b, lambda c: self._set("eddy_color_b", c)
+        )
+        form.addRow("eddy B", self._eddy_b)
+        return box
+
+    def _on_eddies_enabled(self, checked: bool) -> None:
+        self._set("eddies_enabled", checked)
+
     def _on_slider(self, name: str, value: float) -> None:
         self._labels[name].setText(f"{value:.2f}")
         self._set(name, value)
@@ -562,6 +608,10 @@ class TuningPanel(QWidget):
         self._dust_enabled.setChecked(self._params.dust_enabled)
         self._dust_enabled.blockSignals(False)
 
+        self._eddies_enabled.blockSignals(True)
+        self._eddies_enabled.setChecked(self._params.eddies_enabled)
+        self._eddies_enabled.blockSignals(False)
+
         for edit, name in (
             (self._text_color, "text_color"),
             (self._glass_color, "glass_color"),
@@ -570,6 +620,8 @@ class TuningPanel(QWidget):
             (self._nebula_b, "nebula_color_b"),
             (self._dust_a, "dust_color_a"),
             (self._dust_b, "dust_color_b"),
+            (self._eddy_a, "eddy_color_a"),
+            (self._eddy_b, "eddy_color_b"),
         ):
             edit.blockSignals(True)
             edit.setText(format_hex_color(getattr(self._params, name)))
@@ -581,12 +633,14 @@ class TuningPanel(QWidget):
         print("\n# --- paste into ShardParams defaults ---")
         for name, _lo, _hi, *_ in (
             _SLIDERS + _GEOMETRY_SLIDERS + _CRYSTAL_SLIDERS + _POST_SLIDERS
-            + _CAMERA_SLIDERS + _SKY_SLIDERS + _DUST_SLIDERS + _SHATTER_SLIDERS
+            + _CAMERA_SLIDERS + _SKY_SLIDERS + _DUST_SLIDERS + _EDDY_SLIDERS
+            + _SHATTER_SLIDERS
         ):
             print(f"    {name}: float = {getattr(p, name):.2f}")
         for name in (
             "glass_color", "text_color", "light_color",
             "nebula_color_a", "nebula_color_b", "dust_color_a", "dust_color_b",
+            "eddy_color_a", "eddy_color_b",
         ):
             rgb = getattr(p, name)
             pretty = ", ".join(f"{c:.3f}" for c in rgb)
@@ -594,4 +648,5 @@ class TuningPanel(QWidget):
         print(f'    font_family: str = "{p.font_family}"')
         print(f"    font_bold: bool = {p.font_bold}")
         print(f"    dust_enabled: bool = {p.dust_enabled}")
+        print(f"    eddies_enabled: bool = {p.eddies_enabled}")
         print("# ---------------------------------------\n")
