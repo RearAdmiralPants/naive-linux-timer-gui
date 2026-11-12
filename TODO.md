@@ -52,6 +52,10 @@ On the alert, after the shatter:
 - The strobe is confined to the 3D view, not the whole window: the buttons and
   the tab bar stay as they are. Widen it if the pulse needs to be louder.
 
+Dust & eddies (feat/gravitational-dust-eddies-albedo; see docs/features/):
+- In progress: M1-M5 per the feature doc
+- HIGH PRIORITY post-MVP: shatter fragments caught in eddy orbits
+
 ---
 - Optimizations
 	- [x] Nebula baked into a 512^2 RG16F cubemap; stars stay procedural.

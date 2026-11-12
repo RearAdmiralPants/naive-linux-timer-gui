@@ -29,3 +29,22 @@ Spawn additional models which you orchestrate to deliver the implementation. Don
 This is an experiment in fully agentically-orchestrated development in a low-stakes codebase. Feel free to make mistakes. Worst case is we drop the feature branch and try it again, or (worse0 delete the local repo and re-clone it from remote. Relatively low danger in active harm to the repo in any meaningful way.
 
 Other opinions or oversights I'm making are welcome. Please point them out.
+
+# Decisions (agreed in session, 2026-11-12)
+
+**Priorities.** Visual effects come before legibility. Dust may pass in front of the readout; digit glow/bloom is the lever for keeping it readable. Runs in every mode (stopwatch, timer, clock). The Eddies section of the tuning panel has a master on/off checkbox. Identifiers use `eddy`.
+
+**Albedo.** Each cloud gets a random albedo (and scattering anisotropy) in a configurable range. Planned lighting, roughly in build order:
+1. Henyey–Greenstein forward scattering of the scene light: backlit dust glows, side-lit dust stays dim.
+2. Eddies as light sources: dust near an eddy is lit by its jets/disk, and goes dark as the eddy fades, before it scatters.
+3. Shatter `spark_*` lights also light the dust.
+4. Supernova: briefly the brightest light in the scene, feeding the HDR bloom/flare chain.
+5. Stretch: dust seen through the shard's refraction; crepuscular rays.
+
+**Rendering/sim.** Soft additive sprites in the HDR pass, not ray-marched volumes (the app is already fragment-bound). Cloud cohesion is faked with a centroid spring per cloud, not real N-body. The sim targets the GPU; OpenGL compute (4.3+) works on Intel/Mesa, NVIDIA and AMD alike, so no CUDA. numpy is the fallback. Target 30+ fps for v0 (60 fps is the standing goal, not a v0 gate); log performance hotspots for a later optimization pass.
+
+**Budget.** `tools/usage_gate.py` checks this before each milestone and between agent tasks: pause when ahead of even five-hour pace by more than 30 min of projected lockout; hard stop at 33% weekly.
+
+**Git.** Commit and push on this branch at my discretion. Merging to main requires the user's smoke test, a summary from me, and the user's signoff.
+
+**Milestones.** M0 harness + gate · M1 drifting dust · M2 eddies + captured orbits · M3 fade, release, re-clump · M4 Ia supernova · M5 panel + presets. Post-MVP, high priority: shatter fragments caught by eddies.
